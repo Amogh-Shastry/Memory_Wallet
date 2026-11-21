@@ -1,4 +1,4 @@
-import type { MemorySource } from "./types";
+import type { MemoryCategory, MemorySource } from "./types";
 
 export const MSG = {
   QUERY_DETECTED: "QUERY_DETECTED",
@@ -7,6 +7,10 @@ export const MSG = {
   INJECT_CONTEXT: "INJECT_CONTEXT",
   REQUEST_DENIED: "REQUEST_DENIED",
   CANCEL_REQUEST: "CANCEL_REQUEST",
+  /** Content -> Background: drop a standing grant after the user sees a receipt. */
+  REVOKE_GRANT: "REVOKE_GRANT",
+  /** Content -> Background: save reviewed facts from the one-click import. */
+  SAVE_IMPORTED_MEMORIES: "SAVE_IMPORTED_MEMORIES",
 } as const;
 
 /** Internal embedding-pipeline messages (background <-> offscreen <-> UI). */
@@ -34,6 +38,8 @@ export interface PreviewMemory {
   category: string;
   /** How this memory was selected for sharing. */
   source: MemorySource;
+  /** Section from an imported answer, shown as a chip in previews. */
+  context?: string;
 }
 
 export interface ProfileChip {
@@ -78,5 +84,32 @@ export interface InjectContextPayload {
   contextText: string;
   query: string;
   memoryCount: number;
+  profileId: string;
   profileName: string;
+  appName: string;
+  /** How this approval was reached, for the share receipt. */
+  duration: "once" | "session" | "always";
+  /** True when a standing grant now exists and can be revoked from the receipt. */
+  standingGranted: boolean;
+  /** Policy can force the card on even with a standing grant; be honest in the receipt. */
+  requireApproval: boolean;
+}
+
+/** Content -> Background: revoke future silent sharing for an app + profile. */
+export interface RevokeGrantPayload {
+  appId: string;
+  profileId: string;
+}
+
+export interface SaveImportedMemoriesPayload {
+  proposals: {
+    content: string;
+    category: MemoryCategory;
+    importance: number;
+    context?: string;
+    kind?: "new" | "update";
+    previous?: { id: string; content: string; context?: string };
+    /** Only present on update proposals: "new" | "old" | "both". */
+    resolution?: "new" | "old" | "both";
+  }[];
 }

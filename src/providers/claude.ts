@@ -18,6 +18,12 @@ const SEND_BUTTON_SELECTORS = [
   'button[data-testid="send-button"]',
   'button[aria-label*="Send" i]',
 ];
+const ASSISTANT_SELECTORS = [
+  'div[data-testid="assistant-message"]',
+  '.font-claude-response',
+  '[data-testid="message-response"]',
+];
+const STOP_SELECTORS = ['button[aria-label*="Stop" i]', 'button[data-testid="stop-button"]'];
 
 function firstMatch<T extends Element>(selectors: string[]): T | null {
   for (const sel of selectors) {
@@ -26,6 +32,12 @@ function firstMatch<T extends Element>(selectors: string[]): T | null {
   }
   return null;
 }
+
+const squash = (s: string): string => s.replace(/\s+/g, "");
+
+/** innerText keeps bullet line breaks; textContent flattens them. */
+const textOf = (el: Element | null): string =>
+  el instanceof HTMLElement ? el.innerText || el.textContent || "" : (el?.textContent ?? "");
 
 function setText(el: HTMLElement, text: string): boolean {
   el.focus();
@@ -39,7 +51,7 @@ function setText(el: HTMLElement, text: string): boolean {
   }
   document.execCommand("selectAll", false);
   document.execCommand("insertText", false, text);
-  return (el.textContent ?? "").includes(text.slice(0, Math.min(40, text.length)));
+  return squash(el.textContent ?? "").includes(squash(text.slice(0, Math.min(40, text.length))));
 }
 
 export const claudeAdapter: AIProviderAdapter = {
@@ -102,5 +114,23 @@ export const claudeAdapter: AIProviderAdapter = {
       }
     }
     return false;
+  },
+
+  detectAssistantReply(): string | null {
+    let last: Element | null = null;
+    for (const sel of ASSISTANT_SELECTORS) {
+      const nodes = document.querySelectorAll(sel);
+      if (nodes.length > 0) last = nodes[nodes.length - 1];
+    }
+    return textOf(last).trim() || null;
+  },
+
+  isGenerating(): boolean {
+    return STOP_SELECTORS.some((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
   },
 };

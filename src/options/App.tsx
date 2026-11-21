@@ -1,18 +1,23 @@
 import { useEffect, useState } from "react";
 import type { ComponentType } from "react";
 import { useWalletState } from "../ui/hooks";
+import { BrandMark } from "../ui/BrandMark";
 import { Card, SectionTitle, Toggle } from "./components";
 import { relativeTime } from "../ui/format";
 import { EMBED_MSG } from "../shared/messages";
+import { CATEGORY_LABELS } from "../shared/constants";
+import { extractFacts, KNOW_ME_PROMPT, proposalFromRaw } from "../shared/extract";
+import type { Proposal, SkippedLine } from "../shared/extract";
+import type { RequestStatus } from "../shared/types";
 import {
   IconBot,
   IconBrain,
   IconCheck,
+  IconCopy,
   IconDashboard,
   IconExternal,
   IconFolder,
   IconInbox,
-  IconLock,
   IconShield,
   IconSliders,
   IconSparkle,
@@ -55,14 +60,17 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  // Stays open for the "You're live" step after a save, but a saved wallet
+  // must never trap the user back in the wizard on the next visit.
+  const [wizardSticky, setWizardSticky] = useState(false);
   const showWizard =
-    !!state && (forceOnboarding || !state.settings.onboardingDone);
+    !!state && (forceOnboarding || wizardSticky || !state.settings.onboardingDone);
 
   return (
     <div className="dashboard">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-icon"><IconLock size={22} /></span>
+          <BrandMark size={40} className="brand-mark" />
           <div>
             <h1>Memory Wallet</h1>
             <p>Your AI memory. Your rules.</p>
@@ -73,6 +81,7 @@ export function App() {
             <button
               key={n.id}
               className={`nav-item ${section === n.id ? "active" : ""}`}
+              disabled={showWizard}
               onClick={() => {
                 setSection(n.id);
                 window.location.hash = n.id;
@@ -91,8 +100,10 @@ export function App() {
           <p className="empty-hint">Loading…</p>
         ) : showWizard ? (
           <Onboarding
+            onSaved={() => setWizardSticky(true)}
             onDone={() => {
               setForceOnboarding(false);
+              setWizardSticky(false);
               setSection("overview");
             }}
           />
@@ -100,7 +111,7 @@ export function App() {
           <>
             {section === "overview" && <Overview />}
             {section === "profiles" && <Profiles />}
-            {section === "memories" && <Memories />}
+            {section === "memories" && <Memories onImport={() => setForceOnboarding(true)} />}
             {section === "apps" && <AIApps />}
             {section === "permissions" && <Permissions />}
             {section === "requests" && <Requests />}
@@ -166,12 +177,13 @@ function Overview() {
   );
 }
 
-export function StatusChip({ status }: { status: "approved" | "denied" | "pending" }) {
-  const map = {
+export function StatusChip({ status }: { status: RequestStatus }) {
+  const map: Record<RequestStatus, { label: string; cls: string }> = {
     approved: { label: "Allowed", cls: "chip-allow" },
     denied: { label: "Denied", cls: "chip-deny" },
     pending: { label: "Pending", cls: "chip-pending" },
-  } as const;
+    cancelled: { label: "Cancelled", cls: "chip-pending" },
+  };
   const meta = map[status];
   return <span className={`chip ${meta.cls}`}>{meta.label}</span>;
 }
@@ -180,23 +192,84 @@ export function StatusChip({ status }: { status: "approved" | "denied" | "pendin
 /* First-run wizard                                                    */
 /* ------------------------------------------------------------------ */
 
-function Onboarding({ onDone }: { onDone: () => void }) {
+/** Fallback on-ramp when the AI hasn't stored anything yet (or refuses). */
+const FALLBACK_QUESTIONS = [
+  "What do you do? (job, studies, or what you spend your days on)",
+  "What are you working on right now?",
+  "How do you like answers — short, detailed, with examples?",
+  "Anything an AI keeps getting wrong about you?",
+];
+
+function Onboarding({ onDone, onSaved }: { onDone: () => void; onSaved: () => void }) {
   const state = useWalletState();
   const [step, setStep] = useState(0);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [fileName, setFileName] = useState("");
-  const [targetProfileId, setTargetProfileId] = useState("__new");
-  const [newProfileName, setNewProfileName] = useState("Personal");
-  const [pickedProfile, setPickedProfile] = useState("");
+  const [raw, setRaw] = useState("");
+  const [proposals, setProposals] = useState<(Proposal & { checked: boolean })[]>([]);
+  const [skipped, setSkipped] = useState<SkippedLine[]>([]);
+  const [showSkipped, setShowSkipped] = useState(false);
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [resolutions, setResolutions] = useState<Record<number, "new" | "old" | "both">>({});
+  const [showQuestions, setShowQuestions] = useState(false);
+  const [answers, setAnswers] = useState(["", "", "", ""]);
+  const [copied, setCopied] = useState(false);
 
   if (!state) return null;
-  const profiles = state.profiles;
+  const current = state;
+  const profileId = state.settings.activeProfileId ?? state.profiles[0]?.id ?? "";
+  const profileName = state.profiles.find((p) => p.id === profileId)?.name ?? "your wallet";
+  const selectedCount = proposals.filter((p, i) => {
+    if (!p.checked || !p.content.trim()) return false;
+    if (p.kind === "update") return (resolutions[i] ?? "new") !== "old";
+    return true;
+  }).length;
 
   async function finish(): Promise<void> {
     const { saveSettings } = await import("../shared/storage");
     await saveSettings({ onboardingDone: true });
     onDone();
+  }
+
+  async function copyPrompt(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(KNOW_ME_PROMPT);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2200);
+    } catch {
+      setMsg("Couldn't copy automatically — select the prompt above and copy it.");
+    }
+  }
+
+  function handleExtract(): void {
+    const source = showQuestions ? answers.filter((a) => a.trim()).join("\n") : raw;
+    const existing = current.memories
+      .filter((m) => m.profileId === profileId)
+      .map((m) => ({
+        id: m.id,
+        content: m.content,
+        context: m.context,
+        category: m.category,
+        previousValues: m.previousValues,
+      }));
+    const found = extractFacts(source, existing);
+    if (found.proposals.length === 0) {
+      if (!showQuestions) {
+        setShowQuestions(true);
+        setMsg("Nothing to pull out of that answer — the four questions below are the fallback.");
+      } else {
+        setMsg("Add a little more detail to at least one answer, then try again.");
+      }
+      return;
+    }
+    setMsg("");
+    setProposals(found.proposals.map((p) => ({ ...p, checked: true })));
+    setResolutions({}); // unset = "Use new"; every update is still shown for review
+    setSkipped(found.skipped);
+    setShowSkipped(false);
+    setReviewQuery("");
+    setStep(1);
   }
 
   async function handleImportFile(file: File): Promise<void> {
@@ -209,15 +282,11 @@ function Onboarding({ onDone }: { onDone: () => void }) {
         setMsg("Could not find any memories in that file.");
         return;
       }
-      let profileId = targetProfileId;
-      if (profileId === "__new") {
-        const name = newProfileName.trim() || "Personal";
-        const existing = profiles.find((p) => p.name.toLowerCase() === name.toLowerCase());
-        profileId = existing ? existing.id : (await actions.createProfile(name)).id;
-      }
-      const res = await actions.importMemoriesIntoProfile(profileId, parsed);
-      setMsg(`Imported ${res.imported} memories into ${profiles.find((p) => p.id === profileId)?.name ?? "profile"}.`);
-      setStep(1);
+      if (!profileId) return;
+      const res = await actions.importMemoriesIntoProfile(profileId, parsed, "import");
+      await actions.setActiveProfile(profileId);
+      setMsg(`Imported ${res.imported} memories into ${profileName}.`);
+      setStep(2);
     } finally {
       setBusy(false);
     }
@@ -225,31 +294,120 @@ function Onboarding({ onDone }: { onDone: () => void }) {
 
   async function handleSample(): Promise<void> {
     setBusy(true);
-    const actions = await import("../shared/actions");
-    await actions.loadDemoData();
-    setBusy(false);
-    setStep(1);
+    try {
+      const actions = await import("../shared/actions");
+      await actions.loadDemoData(); // also points the wallet at the demo profile
+      setStep(2);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function handleContinue(): Promise<void> {
-    const id =
-      pickedProfile || state?.settings.activeProfileId || profiles[0]?.id;
-    if (id) {
+  async function startEmpty(): Promise<void> {
+    if (profileId) {
       const { setActiveProfile } = await import("../shared/actions");
-      await setActiveProfile(id);
+      await setActiveProfile(profileId);
     }
     setStep(2);
+  }
+
+  async function handleSave(): Promise<void> {
+    if (!profileId || selectedCount === 0) return;
+    setBusy(true);
+    try {
+      const actions = await import("../shared/actions");
+      for (const [i, p] of proposals.entries()) {
+        if (!p.checked || !p.content.trim()) continue;
+
+        if (p.kind === "update" && p.previous) {
+          const choice = resolutions[i] ?? "new";
+          if (choice === "old") continue;
+          if (choice === "new") {
+            await actions.updateMemory(p.previous.id, {
+              content: p.content.trim(),
+              category: p.category,
+              importance: p.importance,
+              context: p.context ?? p.previous.context,
+              previousValues: [...(p.previous.previousValues ?? []), p.previous.content],
+            });
+          } else {
+            // "Keep both": leave the old memory and save the new version beside it.
+            await actions.addMemory({
+              profileId,
+              content: p.content.trim(),
+              category: p.category,
+              importance: p.importance,
+              origin: "ai-import",
+              context: p.context,
+            });
+          }
+          continue;
+        }
+
+        await actions.addMemory({
+          profileId,
+          content: p.content.trim(),
+          category: p.category,
+          importance: p.importance,
+          origin: "ai-import",
+          context: p.context,
+        });
+      }
+      // The worker may still be waking; a failed wake-up is harmless because
+      // the next query re-indexes anyway, but it must not log an unhandled error.
+      void chrome.runtime.sendMessage({ type: EMBED_MSG.REBUILD_INDEX }).catch(() => undefined);
+      await actions.setActiveProfile(profileId);
+      const { saveSettings } = await import("../shared/storage");
+      await saveSettings({ onboardingDone: true });
+      onSaved();
+      setStep(2);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const updateProposals = proposals
+    .map((p, index) => ({ ...p, index }))
+    .filter((p) => p.kind === "update");
+
+  const visibleProposals = proposals
+    .map((p, index) => ({ ...p, index }))
+    .filter((p) => {
+      if (p.kind === "update") return false;
+      const q = reviewQuery.trim().toLowerCase();
+      if (!q) return true;
+      return p.content.toLowerCase().includes(q) || (p.context ?? "").toLowerCase().includes(q);
+    });
+  const grouped = new Map<string, typeof visibleProposals>();
+  for (const p of visibleProposals) {
+    const key = p.context ?? "Other";
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(p);
+  }
+
+  function toggleGroup(items: typeof visibleProposals, checked: boolean): void {
+    const indexes = new Set(items.map((p) => p.index));
+    setProposals((prev) => prev.map((p, i) => (indexes.has(i) ? { ...p, checked } : p)));
+  }
+
+  function addSkipped(): void {
+    setProposals((prev) => [
+      ...prev,
+      ...skipped.map((s) => ({ ...proposalFromRaw(s.raw, s.context), checked: true })),
+    ]);
+    setSkipped([]);
+    setShowSkipped(false);
   }
 
   return (
     <div className="wizard">
       <header className="wizard-head">
-        <h1>Welcome to Memory Wallet</h1>
-        <p>Your AI memory. Your rules. Three quick steps and you're live.</p>
+        <h1>Bring what your AI already knows</h1>
+        <p>One paste. You check every line. Nothing is saved until you say so.</p>
       </header>
 
       <ol className="wizard-steps">
-        {["Your memories", "Active profile", "Try it live"].map((label, i) => (
+        {["What your AI knows", "Review", "Try it live"].map((label, i) => (
           <li key={label} className={i === step ? "current" : i < step ? "done" : ""}>
             <span className="step-num">{i < step ? <IconCheck size={11} /> : i + 1}</span> {label}
           </li>
@@ -257,107 +415,263 @@ function Onboarding({ onDone }: { onDone: () => void }) {
       </ol>
 
       {step === 0 && (
-        <div className="wizard-options">
-          <div className="wizard-option">
-            <div className="wizard-option-head">
-              <strong>Import my ChatGPT memory JSON</strong>
-              <span className="pill">Recommended</span>
-            </div>
+        <div className="stack">
+          <Card>
+            <h3 className="card-title"><IconSparkle size={15} className="title-icon" /> Ask your AI, then paste the answer</h3>
             <p className="muted small">
-              From ChatGPT: Settings → Personalization → Memory → Manage (copy the list and save as .json) or your data-export <code>memories.json</code>. Everything stays on this device.
+              Open ChatGPT or Claude, send it the prompt below, then paste its answer here. Or, on
+              either site, click <strong>Import what ChatGPT knows</strong> next to the floating
+              pill to do it in one click. Everything is extracted on this device — no upload, no account.
             </p>
-            <div className="form-row">
-              <select value={targetProfileId} onChange={(e) => setTargetProfileId(e.target.value)}>
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.icon} {p.name}
-                  </option>
+
+            <div className="prompt-box">
+              <p className="prompt-text">“{KNOW_ME_PROMPT}”</p>
+              <button className="btn small" onClick={() => void copyPrompt()}>
+                <IconCopy size={13} /> {copied ? "Copied" : "Copy prompt"}
+              </button>
+            </div>
+
+            {!showQuestions ? (
+              <>
+                <textarea
+                  className="paste-box"
+                  rows={7}
+                  placeholder="Paste what ChatGPT or Claude said about you…"
+                  value={raw}
+                  onChange={(e) => setRaw(e.target.value)}
+                />
+                <div className="btn-row">
+                  <button className="btn btn-primary" disabled={!raw.trim()} onClick={handleExtract}>
+                    Extract memories
+                  </button>
+                  <button className="btn small" onClick={() => setShowQuestions(true)}>
+                    No memory yet? Answer 4 quick questions
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="fallback-questions">
+                <p className="muted small">
+                  Answer any of these in your own words — skip what doesn't apply.
+                </p>
+                {FALLBACK_QUESTIONS.map((q, i) => (
+                  <div className="question-block" key={q}>
+                    <label className="section-label" htmlFor={`mw-q-${i}`}>{q}</label>
+                    <textarea
+                      id={`mw-q-${i}`}
+                      rows={2}
+                      value={answers[i]}
+                      placeholder="A sentence or two is plenty"
+                      onChange={(e) => {
+                        const next = [...answers];
+                        next[i] = e.target.value;
+                        setAnswers(next);
+                      }}
+                    />
+                  </div>
                 ))}
-                <option value="__new">New profile…</option>
-              </select>
-              {targetProfileId === "__new" && (
-                <input
-                  placeholder="Profile name"
-                  value={newProfileName}
-                  onChange={(e) => setNewProfileName(e.target.value)}
-                />
-              )}
-              <label className="btn btn-primary file-btn">
-                {busy ? "Importing…" : "Choose file"}
-                <input
-                  type="file"
-                  accept=".json,application/json,.txt"
-                  hidden
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) {
-                      setFileName(f.name);
-                      void handleImportFile(f);
-                    }
-                  }}
-                />
-              </label>
-            </div>
-            {fileName && <p className="muted small">Selected: {fileName}</p>}
-          </div>
+                <div className="btn-row">
+                  <button
+                    className="btn btn-primary"
+                    disabled={!answers.some((a) => a.trim())}
+                    onClick={handleExtract}
+                  >
+                    Make memories
+                  </button>
+                  <button className="btn small" onClick={() => { setShowQuestions(false); setMsg(""); }}>
+                    Back to paste
+                  </button>
+                </div>
+              </div>
+            )}
+            {msg && <p className="muted small">{msg}</p>}
+          </Card>
 
-          <div className="wizard-option">
-            <div className="wizard-option-head">
-              <strong>Load sample data</strong>
-              <span className="muted small">quick demo</span>
+          <details className="advanced-disclosure">
+            <summary className="muted small">Advanced — import JSON or load samples</summary>
+            <div className="stack">
+              <div className="wizard-option">
+                <div className="wizard-option-head"><strong>Import memory JSON</strong></div>
+                <p className="muted small">
+                  Already have a <code>memories.json</code> from a data export? Choose it here.
+                </p>
+                <label className="btn file-btn">
+                  {busy ? "Importing…" : "Choose file"}
+                  <input
+                    type="file"
+                    accept=".json,application/json,.txt"
+                    hidden
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) {
+                        setFileName(f.name);
+                        void handleImportFile(f);
+                      }
+                    }}
+                  />
+                </label>
+                {fileName && <p className="muted small">Selected: {fileName}</p>}
+              </div>
+              <div className="wizard-option">
+                <div className="wizard-option-head"><strong>Load sample data</strong></div>
+                <p className="muted small">Clearly-marked demo memories, so you can try the flow first.</p>
+                <button className="btn" disabled={busy} onClick={() => void handleSample()}>
+                  Load sample data
+                </button>
+              </div>
+              <button className="btn small" onClick={() => void startEmpty()}>
+                Skip and start empty
+              </button>
             </div>
-            <p className="muted small">
-              Creates clearly-marked Startup / Work / Personal profiles with a few sample memories.
-            </p>
-            <button className="btn" disabled={busy} onClick={() => void handleSample()}>
-              Load sample data
-            </button>
-          </div>
-
-          <div className="wizard-option">
-            <div className="wizard-option-head">
-              <strong>Start empty</strong>
-            </div>
-            <p className="muted small">Add memories yourself later in the Memories tab.</p>
-            <button className="btn" onClick={() => setStep(1)}>
-              Continue empty
-            </button>
-          </div>
-
-          {msg && <p className="muted small">{msg}</p>}
+          </details>
         </div>
       )}
 
       {step === 1 && (
         <div className="stack">
-          <p className="muted small">
-            Which profile should AI apps read from by default? You can switch anytime in the popup.
-          </p>
-          <div className="wizard-profiles">
-            {profiles.map((p) => {
-              const count = state.memories.filter((m) => m.profileId === p.id).length;
-              const isActive = state.settings.activeProfileId === p.id;
-              const selected = pickedProfile ? pickedProfile === p.id : isActive;
-              return (
+          <Card>
+            <div className="wizard-option-head">
+              <h3 className="card-title">Review before saving</h3>
+              <span className="pill">Saving {selectedCount} of {proposals.length}</span>
+            </div>
+            <p className="review-warning">
+              <IconShield size={14} /> ChatGPT may have guessed. Check each line before saving.
+            </p>
+            {updateProposals.length > 0 && (
+              <div className="update-section">
+                <div className="update-section-head">
+                  <strong>{updateProposals.length} possible update{updateProposals.length === 1 ? "" : "s"}</strong>
+                  <span className="muted small">The AI said something different about an existing memory. You decide.</span>
+                </div>
+                {updateProposals.map((p) => {
+                  const choice = resolutions[p.index] ?? "new";
+                  return (
+                    <div key={p.index} className="update-row">
+                      <div className="update-row-title">{p.context ?? "Existing memory"}</div>
+                      <div className="update-old">Was: {p.previous?.content}</div>
+                      <label className="update-new-label">
+                        Now:
+                        <input
+                          className="update-new"
+                          value={p.content}
+                          aria-label="Updated memory text"
+                          onChange={(e) =>
+                            setProposals((prev) =>
+                              prev.map((x, i) => (i === p.index ? { ...x, content: e.target.value } : x)),
+                            )
+                          }
+                        />
+                      </label>
+                      <div className="update-choices">
+                        {(["old", "new", "both"] as const).map((option) => (
+                          <button
+                            key={option}
+                            className={`btn small ${choice === option ? "btn-primary" : ""}`}
+                            onClick={() => setResolutions((prev) => ({ ...prev, [p.index]: option }))}
+                          >
+                            {option === "old" ? "Keep old" : option === "new" ? "Use new" : "Keep both"}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <input
+              className="review-search"
+              placeholder="Search memories or sections…"
+              value={reviewQuery}
+              onChange={(e) => setReviewQuery(e.target.value)}
+            />
+            <div className="review-groups">
+              {[...grouped.entries()].map(([section, items]) => {
+                const allChecked = items.every((p) => p.checked);
+                return (
+                  <section key={section} className="review-group">
+                    <div className="review-group-head">
+                      <strong>{section}</strong>
+                      <span className="muted small">{items.length} facts</span>
+                      <button className="btn small" onClick={() => toggleGroup(items, !allChecked)}>
+                        {allChecked ? "Deselect all" : "Select all"}
+                      </button>
+                    </div>
+                    <ul className="review-list">
+                      {items.map((p) => (
+                        <li key={p.index} className={`review-row ${p.checked ? "" : "unchecked"}`}>
+                          <input
+                            type="checkbox"
+                            checked={p.checked}
+                            aria-label={`Save: ${p.content}`}
+                            onChange={(e) =>
+                              setProposals((prev) =>
+                                prev.map((x, i) =>
+                                  i === p.index ? { ...x, checked: e.target.checked } : x,
+                                ),
+                              )
+                            }
+                          />
+                          <input
+                            className="review-text"
+                            value={p.content}
+                            aria-label="Memory text"
+                            onChange={(e) =>
+                              setProposals((prev) =>
+                                prev.map((x, i) =>
+                                  i === p.index ? { ...x, content: e.target.value } : x,
+                                ),
+                              )
+                            }
+                          />
+                          <span className="chip chip-pending">{CATEGORY_LABELS[p.category]}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                );
+              })}
+            </div>
+
+            {skipped.length > 0 && (
+              <div className="skipped-panel">
                 <button
-                  key={p.id}
-                  className={`wizard-profile-card ${selected ? "selected" : ""}`}
-                  onClick={() => setPickedProfile(p.id)}
+                  className="btn small"
+                  onClick={() => setShowSkipped((v) => !v)}
+                  aria-expanded={showSkipped}
                 >
-                  <span className="profile-big">{p.icon}</span>
-                  <span className="wizard-profile-meta">
-                    <strong>{p.name}</strong>
-                    <span className="muted small">{count} memories</span>
-                  </span>
-                  {selected && <span className="pill">Active</span>}
+                  {showSkipped ? "Hide" : "Show"} {skipped.length} skipped line
+                  {skipped.length === 1 ? "" : "s"}
                 </button>
-              );
-            })}
-          </div>
+                {showSkipped && (
+                  <>
+                    <ul className="skipped-list">
+                      {skipped.map((s, i) => (
+                        <li key={i}>
+                          <span>{s.raw}</span>
+                          <em>{s.reason}</em>
+                        </li>
+                      ))}
+                    </ul>
+                    <button className="btn small" onClick={addSkipped}>
+                      Add these too
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
+            <p className="muted small">
+              Saved to “{profileName}”. You can edit or delete any of these later in Memories.
+            </p>
+          </Card>
           <div className="btn-row">
             <button className="btn" onClick={() => setStep(0)}>Back</button>
-            <button className="btn btn-primary" onClick={() => void handleContinue()}>
-              Continue
+            <button
+              className="btn btn-primary"
+              disabled={busy || selectedCount === 0}
+              onClick={() => void handleSave()}
+            >
+              {busy ? "Saving…" : `Save ${selectedCount} memories`}
             </button>
           </div>
         </div>
@@ -375,6 +689,7 @@ function Onboarding({ onDone }: { onDone: () => void }) {
             <li>Your message pauses and a Memory Request card appears. Pick Once → Allow.</li>
             <li>The context block + your question are sent together — the answer uses your memory.</li>
           </ol>
+          {msg && <p className="muted small">{msg}</p>}
           <div className="btn-row">
             <button className="btn" onClick={() => setStep(1)}>Back</button>
             <button
@@ -541,13 +856,18 @@ function ProfilesSection() {
   );
 }
 
-function Memories() {
+function Memories({ onImport }: { onImport: () => void }) {
   return (
     <>
       <SectionTitle
         title="Memories"
-        subtitle="Add facts about yourself manually. Memories never leave this device unless you approve a request."
+        subtitle="Add facts about yourself manually, or re-import and update what your AI already knows. Memories never leave this device unless you approve a request."
       />
+      <div className="btn-row">
+        <button className="btn btn-primary" onClick={onImport}>
+          Import or update from ChatGPT
+        </button>
+      </div>
       <MemoriesSection />
     </>
   );
@@ -728,6 +1048,7 @@ function MemoriesSection() {
                   className="btn small danger icon-btn"
                   aria-label="Delete memory"
                   onClick={() => {
+                    if (!window.confirm(`Delete this memory?\n\n${m.content}`)) return;
                     void import("../shared/actions").then((a) => a.deleteMemory(m.id));
                   }}
                 >
@@ -736,7 +1057,12 @@ function MemoriesSection() {
               </li>
             );
           })}
-          {shown.length === 0 && <li className="empty-hint">No memories yet — add one or load demo data in Settings.</li>}
+          {shown.length === 0 && (
+            <li className="empty-hint">
+              No memories yet. Ask ChatGPT “what do you know about me?”, paste its answer in Setup,
+              or run Setup again from Settings.
+            </li>
+          )}
         </ul>
       </Card>
     </div>
@@ -965,8 +1291,7 @@ function Requests() {
 }
 
 interface EmbedStatus {
-  state?: "idle" | "downloading" | "ready" | "error";
-  pct?: number;
+  state?: "idle" | "indexing" | "ready" | "error";
   indexed?: number;
   total?: number;
   error?: string;
@@ -996,10 +1321,8 @@ function SemanticSearchCard(props: {
 
   const s = status ?? { state: "idle" as const };
   const stateLabel =
-    s.state === "downloading"
-      ? s.pct !== undefined
-        ? `Preparing model… ${s.pct}%`
-        : `Indexing memories… ${s.indexed ?? 0}/${s.total ?? 0}`
+    s.state === "indexing"
+      ? `Indexing memories… ${s.indexed ?? 0}/${s.total ?? 0}`
       : s.state === "ready"
         ? `Ready — ${s.indexed ?? 0} of ${s.total ?? 0} memories indexed`
         : s.state === "error"
@@ -1011,8 +1334,8 @@ function SemanticSearchCard(props: {
       <h3 className="card-title">Semantic search</h3>
       <p className="muted small">
         Matches memories by meaning, not just keywords, using a small AI model that runs entirely
-        on this device. One-time ~30MB model download from Hugging Face, cached locally afterwards.
-        When unavailable, the wallet silently falls back to keyword matching.
+        on this device. The model ships inside the extension — nothing is downloaded at runtime
+        and no data leaves your machine. When unavailable, the wallet falls back to keyword matching.
       </p>
       <div className="setting-row">
         <div>
@@ -1034,11 +1357,11 @@ function SemanticSearchCard(props: {
         <button
           className="btn small"
           onClick={() => {
-            setMsg("Clearing model cache…");
+            setMsg("Resetting model…");
             void chrome.runtime.sendMessage({ type: EMBED_MSG.CLEAR_MODEL_CACHE });
           }}
         >
-          Clear model cache
+          Reset model
         </button>
         {msg && <span className="muted small">{msg}</span>}
       </div>
@@ -1048,6 +1371,7 @@ function SemanticSearchCard(props: {
 
 function Settings({ onRunSetup }: { onRunSetup: () => void }) {
   const state = useWalletState();
+  const [demoMsg, setDemoMsg] = useState("");
   if (!state) return null;
   const s = state.settings;
 
@@ -1070,6 +1394,21 @@ function Settings({ onRunSetup }: { onRunSetup: () => void }) {
               checked={s.pauseBeforeShare !== false}
               onChange={(v) =>
                 void import("../shared/storage").then((st) => st.saveSettings({ pauseBeforeShare: v }))
+              }
+            />
+          </div>
+          <div className="setting-row">
+            <div>
+              <strong>Always ask before sharing memory</strong>
+              <p className="muted small">
+                After your first Allow, later messages share silently. Turn this on to require the
+                permission card every time. An enterprise policy can force this on.
+              </p>
+            </div>
+            <Toggle
+              checked={s.requireApproval === true}
+              onChange={(v) =>
+                void import("../shared/storage").then((st) => st.saveSettings({ requireApproval: v }))
               }
             />
           </div>
@@ -1155,6 +1494,51 @@ function Settings({ onRunSetup }: { onRunSetup: () => void }) {
             void import("../shared/storage").then((st) => st.saveSettings({ semanticSearch: v }))
           }
         />
+
+        <Card>
+          <h3 className="card-title">Your data</h3>
+          <p className="muted small">
+            Everything lives in this browser profile. Export gives you a single JSON file with every
+            memory, profile, permission and the request log — no account, no upload.
+          </p>
+          <div className="btn-row">
+            <button
+              className="btn"
+              onClick={() => {
+                void (async () => {
+                  const { exportAllData } = await import("../shared/actions");
+                  const json = await exportAllData();
+                  const blob = new Blob([json], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `memory-wallet-${new Date().toISOString().slice(0, 10)}.json`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                })();
+              }}
+            >
+              Export all data
+            </button>
+            <button
+              className="btn"
+              onClick={() => {
+                void (async () => {
+                  const { clearDemoData } = await import("../shared/actions");
+                  const res = await clearDemoData();
+                  setDemoMsg(
+                    res.memories === 0 && res.profiles === 0
+                      ? "No sample data found — nothing to clear."
+                      : `Removed ${res.memories} sample memories and ${res.profiles} sample profiles.`,
+                  );
+                })();
+              }}
+            >
+              Clear demo data
+            </button>
+          </div>
+          {demoMsg && <p className="muted small">{demoMsg}</p>}
+        </Card>
 
         <Card>
           <h3 className="card-title">Sample data</h3>

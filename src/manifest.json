@@ -2,12 +2,15 @@
   "manifest_version": 3,
   "name": "Memory Wallet",
   "version": "1.0.0",
-  "description": "Your AI memory. Your rules. Control what ChatGPT and Claude can remember about you. 100% local — nothing leaves your device.",
-  "homepage_url": "https://github.com/Souhadra/Memory_Wallet",
+  "minimum_chrome_version": "120",
+  "description": "Your AI memory. Your rules. A local memory wallet that ChatGPT and Claude can only read with your permission. Nothing leaves your device.",
   "permissions": ["storage", "scripting", "offscreen"],
+  "storage": {
+    "managed_schema": "managed-schema.json"
+  },
   "host_permissions": ["https://chatgpt.com/*", "https://claude.ai/*"],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'none'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'"
   },
   "background": {
     "service_worker": "background/background.js",
@@ -27,6 +30,7 @@
   "options_page": "options/options.html",
   "icons": {
     "16": "assets/icon16.png",
+    "32": "assets/icon32.png",
     "48": "assets/icon48.png",
     "128": "assets/icon128.png"
   }

@@ -3,6 +3,8 @@ import type { MemorySource } from "./types";
 interface ContextItem {
   content: string;
   source: MemorySource;
+  /** Optional section from an imported answer (e.g. "Technical Skills"). */
+  context?: string;
 }
 
 const SECTION_LABELS: Record<MemorySource, string> = {
@@ -23,7 +25,10 @@ export function buildContextBlock(profileName: string, memories: ContextItem[]):
     const items = memories.filter((m) => m.source === source);
     if (items.length === 0) continue;
     lines.push(SECTION_LABELS[source] + ":");
-    for (const item of items) lines.push(`- ${item.content}`);
+    for (const item of items) {
+      const tag = item.context ? `[${item.context}] ` : "";
+      lines.push(`- ${tag}${item.content}`);
+    }
   }
 
   if (lines.length === 2) {

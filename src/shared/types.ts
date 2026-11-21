@@ -17,6 +17,10 @@ export type MemoryCategory =
   | "goal"
   | "other";
 
+/** Where a memory came from. Used for provenance in Activity and for
+ *  "forget this batch" after an import, without duplicating memory content. */
+export type MemoryOrigin = "ai-import" | "wizard" | "paste" | "import" | "manual" | "demo";
+
 export interface Memory {
   id: string;
   profileId: string;
@@ -25,6 +29,12 @@ export interface Memory {
   importance: number; // 0..1
   createdAt: string;
   updatedAt: string;
+  origin?: MemoryOrigin;
+  /** Section the fact came from in an imported answer (e.g. "Technical Skills").
+   *  Metadata, not text — so the memory itself stays clean and portable. */
+  context?: string;
+  /** Older values this fact replaced, newest last. Keeps updates reversible. */
+  previousValues?: string[];
 }
 
 export interface AIApplication {
@@ -44,7 +54,7 @@ export interface Permission {
   updatedAt: string;
 }
 
-export type RequestStatus = "pending" | "approved" | "denied";
+export type RequestStatus = "pending" | "approved" | "denied" | "cancelled";
 export type RequestDuration = "once" | "session" | "always";
 
 export interface MemoryRequest {
@@ -77,6 +87,8 @@ export interface Settings {
   semanticSearch: boolean;
   /** First-run wizard completed (or skipped). */
   onboardingDone: boolean;
+  /** Never auto-approve, even with a standing grant (also forced by policy). */
+  requireApproval: boolean;
 }
 
 export interface WalletState {

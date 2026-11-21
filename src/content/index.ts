@@ -2,8 +2,11 @@ import type { AIProviderAdapter } from "../providers/types";
 import type { Settings } from "../shared/types";
 import { activeProvider } from "../providers/registry";
 import { QueryDetector } from "./detector";
+import { ensureContentFont } from "./font";
 import { PendingFlow } from "./pendingFlow";
 import { showPill, removePill, showToast } from "./ui/toast";
+import { isImporting } from "./importState";
+import { startOneClickImport } from "./importFlow";
 import {
   MSG,
   type InjectContextPayload,
@@ -26,6 +29,9 @@ if (!w.__memoryWalletLoaded) {
 }
 
 function initContentScript(provider: AIProviderAdapter): void {
+  // Warm the bundled font before any permission card or toast renders.
+  void ensureContentFont();
+
   // Cached settings so capture-phase listeners can decide synchronously.
   let settings: Partial<Settings> = {};
 
@@ -39,7 +45,11 @@ function initContentScript(provider: AIProviderAdapter): void {
     const profiles = (res["mw_profiles"] ?? []) as { id: string; name: string; icon?: string }[];
     const s = (res["mw_settings"] ?? {}) as Partial<Settings>;
     const profile = profiles.find((p) => p.id === s.activeProfileId);
-    showPill(profile ? `${profile.icon ?? "📁"} ${profile.name}` : "no profile");
+    showPill(
+      profile ? `${profile.icon ?? "📁"} ${profile.name}` : "no profile",
+      () => { void startOneClickImport(provider); },
+      provider.name,
+    );
   }
 
   void chrome.storage.local.get("mw_settings").then((res) => {
@@ -71,8 +81,9 @@ function initContentScript(provider: AIProviderAdapter): void {
       isSendButton: (target) => provider.isSendButton(target),
     },
     {
-      shouldIntercept: () => settings.pauseBeforeShare !== false,
+      shouldIntercept: () => settings.pauseBeforeShare !== false && !isImporting(),
       onQueryNeedsWallet: (query, paused) => {
+        if (isImporting()) return; // our own prompt is not a user question
         if (!flow.canAcceptQuery()) {
           if (paused) {
             showToast("Memory Wallet is still handling your previous request", "info");
@@ -90,6 +101,16 @@ function initContentScript(provider: AIProviderAdapter): void {
     if (!flow.canAcceptQuery()) return;
     if (detector.forceEmit()) return;
     showToast("Ask a question first — then click the pill again", "info");
+  });
+
+  // Navigating away or closing the tab abandons any open card. Tell the worker
+  // immediately so the tab is not left "busy" until the pending entry expires.
+  window.addEventListener("pagehide", () => {
+    const requestId = flow.pendingRequestId;
+    if (!requestId) return;
+    void chrome.runtime
+      .sendMessage({ type: MSG.CANCEL_REQUEST, payload: { requestId } })
+      .catch(() => undefined);
   });
 
   chrome.runtime.onMessage.addListener((message) => {

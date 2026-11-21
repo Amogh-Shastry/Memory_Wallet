@@ -1,7 +1,9 @@
 import type { PreviewMemory, ShowMemoryRequestPayload } from "../../shared/messages";
 import { buildTokenStyleEl } from "../../ui/contentTokens";
+import { brandMarkSvg } from "../../ui/brand";
+import { ensureContentFont } from "../font";
 
-/* Component-specific styles for the Web3-grade memory request signing modal.
+/* Component-specific styles for the memory request permission modal.
    Token variables are injected via buildTokenStyleEl(). */
 const MODAL_COMPONENT_CSS = `
 * { box-sizing: border-box; }
@@ -11,7 +13,9 @@ const MODAL_COMPONENT_CSS = `
   z-index: 2147483647;
   display: flex; align-items: flex-start; justify-content: flex-end;
   padding: 20px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11", "tnum";
+  letter-spacing: -0.011em;
   animation: mw-fadeIn 180ms cubic-bezier(0.16, 1, 0.3, 1);
   background: rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(4px);
@@ -58,8 +62,8 @@ const MODAL_COMPONENT_CSS = `
 .mw-badge-icon {
   display: flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; border-radius: 6px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.4) 0%, rgba(6, 182, 212, 0.3) 100%);
-  border: 1px solid rgba(99, 102, 241, 0.4);
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.32);
   color: #fff;
 }
 
@@ -175,6 +179,7 @@ button:focus-visible, .mw-prof-chip:focus-visible, .mw-duration:focus-visible {
 
 .mw-cat.sem-tag { background: rgba(6, 182, 212, 0.15); color: #06b6d4; }
 .mw-cat.gen-tag { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+.mw-cat.ctx-tag { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; text-transform: none; letter-spacing: 0; font-weight: 600; }
 
 .mw-preview-empty {
   font-size: 11.5px; color: #828599; font-style: italic; margin: 0;
@@ -195,6 +200,17 @@ button:focus-visible, .mw-prof-chip:focus-visible, .mw-duration:focus-visible {
 .mw-duration.selected {
   border-color: #6366f1; background: #191b32; color: #fff;
   box-shadow: 0 0 8px rgba(99, 102, 241, 0.25);
+}
+
+.mw-recommended {
+  display: block; margin-top: 2px;
+  font-size: 8px; font-weight: 700; letter-spacing: 0.5px;
+  text-transform: uppercase; color: #a5b4fc;
+}
+
+.mw-grant-note {
+  margin: 2px 0 0; font-size: 10.5px; line-height: 1.45;
+  color: #9a9db2; min-height: 15px;
 }
 
 .mw-foot {
@@ -244,12 +260,10 @@ button:focus-visible, .mw-prof-chip:focus-visible, .mw-duration:focus-visible {
 `;
 
 /** Thin-line inline SVG for shadow-DOM templates. */
-function svgIcon(name: "lock" | "x" | "check" | "zap" | "shield", size = 14): string {
+function svgIcon(name: "lock" | "x" | "check" | "zap", size = 14): string {
   const paths: Record<string, string> = {
     lock:
       '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
-    shield:
-      '<path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z"/>',
     zap:
       '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
     x: '<path d="M18 6 6 18M6 6l12 12"/>',
@@ -266,7 +280,7 @@ export interface DecisionPayload {
 }
 
 /**
- * MetaMask-Grade Sovereign Context Signing Modal rendered in Shadow DOM.
+ * Memory Wallet permission modal rendered in Shadow DOM.
  * Supports hot profile switching, live relevance matching preview, and keyboard shortcuts (Enter / Esc).
  */
 export class MemoryRequestModal {
@@ -277,7 +291,8 @@ export class MemoryRequestModal {
     return this.host !== null;
   }
 
-  show(payload: ShowMemoryRequestPayload): Promise<DecisionPayload> {
+  async show(payload: ShowMemoryRequestPayload): Promise<DecisionPayload> {
+    await ensureContentFont();
     return new Promise((resolve) => {
       if (this.host) {
         resolve({ decision: "deny", duration: "once" });
@@ -310,11 +325,11 @@ export class MemoryRequestModal {
         "beforeend",
         `
         <div class="mw-overlay">
-          <div class="mw-card" role="dialog" aria-label="Memory Wallet Signature Request">
+          <div class="mw-card" role="dialog" aria-label="Memory Wallet permission request" tabindex="-1">
             <div class="mw-head">
               <div class="mw-brand-badge">
-                <span class="mw-badge-icon">${svgIcon("shield", 12)}</span>
-                <span>Sign Memory Request</span>
+                <span class="mw-badge-icon">${brandMarkSvg(14)}</span>
+                <span>Memory Request</span>
               </div>
               <button class="mw-close" title="Reject and close (Esc)">${svgIcon("x", 14)}</button>
             </div>
@@ -326,17 +341,17 @@ export class MemoryRequestModal {
                   <span>${escapeHtml(payload.appName)} Requesting Context</span>
                   ${payload.paused ? `<span class="mw-paused-indicator"><span class="mw-paused-dot"></span> Paused</span>` : ""}
                 </div>
-                ${payload.reason ? `<p class="mw-prompt-quote">"${escapeHtml(truncatePreview(payload.reason, 140))}"</p>` : ""}
+                ${payload.reason ? `<p class="mw-prompt-quote">${escapeHtml(truncatePreview(payload.reason, 140))}</p>` : ""}
               </div>
 
               <!-- Profile Switcher Chips -->
               <div class="mw-section">
-                <div class="mw-label">Target Persona Profile</div>
+                <div class="mw-label">Profile</div>
                 <div class="mw-profiles">
                   ${profiles
                     .map(
                       (p) =>
-                        `<button type="button" class="mw-prof-chip${p.id === selectedProfileId ? " selected" : ""}" data-pid="${escapeHtml(p.id)}"><span>${p.icon ?? "📁"}</span>${escapeHtml(p.name)}</button>`,
+                        `<button type="button" class="mw-prof-chip${p.id === selectedProfileId ? " selected" : ""}" data-pid="${escapeHtml(p.id)}"><span>${escapeHtml(p.icon ?? "📁")}</span>${escapeHtml(p.name)}</button>`,
                     )
                     .join("")}
                 </div>
@@ -347,24 +362,25 @@ export class MemoryRequestModal {
 
               <!-- Duration Selector -->
               <div class="mw-section">
-                <div class="mw-label">Signature Scope</div>
+                <div class="mw-label">How long should this last?</div>
                 <div class="mw-durations">
-                  <button type="button" class="mw-duration selected" data-value="once" title="Sign for this single prompt only">Once</button>
-                  <button type="button" class="mw-duration" data-value="session" title="Sign until browser tab closes">Session</button>
-                  <button type="button" class="mw-duration" data-value="always" title="Always auto-sign for this profile">Always</button>
+                  <button type="button" class="mw-duration" data-value="once" title="Share for this one message only">Once</button>
+                  <button type="button" class="mw-duration" data-value="session" title="Share until this browser session ends">This browser</button>
+                  <button type="button" class="mw-duration selected" data-value="always" title="Share without asking again for this AI and profile">Always<span class="mw-recommended">suggested</span></button>
                 </div>
+                <p class="mw-grant-note"></p>
               </div>
             </div>
 
             <div class="mw-foot">
               <button class="mw-btn mw-deny" data-decision="deny">
-                <span>Reject</span> <span class="mw-shortcut-hint">Esc</span>
+                <span>Deny</span> <span class="mw-shortcut-hint">Esc</span>
               </button>
               <button class="mw-btn mw-allow" data-decision="allow">
-                <span>${svgIcon("zap", 13)} Sign & Inject</span> <span class="mw-shortcut-hint">Enter</span>
+                <span>${svgIcon("zap", 13)} Share & Send</span> <span class="mw-shortcut-hint">Enter</span>
               </button>
             </div>
-            <div class="mw-brand-footer">Memory Wallet · 100% On-Device & Encrypted</div>
+            <div class="mw-brand-footer">Memory Wallet · 100% on-device</div>
           </div>
         </div>
         `,
@@ -385,6 +401,7 @@ export class MemoryRequestModal {
               <div class="mw-prev-text">${escapeHtml(truncatePreview(p.content))}</div>
               <div class="mw-prev-meta">
                 <span class="mw-cat${tagCls}">${tagText}</span>
+                ${p.context ? `<span class="mw-cat ctx-tag">${escapeHtml(p.context)}</span>` : ""}
               </div>
             </li>`;
           })
@@ -403,7 +420,7 @@ export class MemoryRequestModal {
         let body: string;
 
         if (list.length === 0) {
-          label = "Context Payload";
+          label = "What will be shared";
           body = `<p class="mw-preview-empty">No direct matches in this profile — question will be submitted without added memory context.</p>`;
         } else {
           const parts = [
@@ -411,11 +428,26 @@ export class MemoryRequestModal {
             nSemantic ? `${nSemantic} semantic` : "",
             nGeneral ? `${nGeneral} general` : "",
           ].filter(Boolean);
-          label = `Signing Context Payload (${parts.join(" · ") || `${list.length} items`})`;
+          label = `Will share (${parts.join(" · ") || `${list.length} items`})`;
           body = renderList(list);
         }
 
         zone.innerHTML = `<div class="mw-label">${label}</div>${body}`;
+      }
+
+      function renderGrantNote(): void {
+        const note = container.querySelector<HTMLElement>(".mw-grant-note");
+        if (!note) return;
+        const duration = durationValue();
+        const profile = profiles.find((p) => p.id === selectedProfileId);
+        const pair = `${escapeHtml(payload.appName)} + ${escapeHtml(profile?.name ?? payload.profileName)}`;
+        if (duration === "always") {
+          note.textContent = `Share with ${pair} without asking again. Revoke anytime in the dashboard.`;
+        } else if (duration === "session") {
+          note.textContent = `Share with ${pair} until you close this browser.`;
+        } else {
+          note.textContent = "Share just this message — you'll be asked again next time.";
+        }
       }
 
       const finish = (result: DecisionPayload) => {
@@ -433,6 +465,7 @@ export class MemoryRequestModal {
           "once") as DecisionPayload["duration"];
 
       renderPreview();
+      renderGrantNote();
 
       // Profile switcher click listeners
       container.querySelectorAll(".mw-prof-chip").forEach((chip) => {
@@ -444,6 +477,7 @@ export class MemoryRequestModal {
             x.classList.toggle("selected", (x as HTMLElement).dataset.pid === selectedProfileId),
           );
           renderPreview();
+          renderGrantNote();
         });
       });
 
@@ -452,6 +486,7 @@ export class MemoryRequestModal {
         el.addEventListener("click", () => {
           container.querySelectorAll(".mw-duration").forEach((x) => x.classList.remove("selected"));
           el.classList.add("selected");
+          renderGrantNote();
         });
       });
 
@@ -471,22 +506,45 @@ export class MemoryRequestModal {
         });
       });
 
-      // Keyboard shortcuts: Enter to allow, Escape to deny
+      // Keyboard shortcuts: Enter to allow, Escape to deny, Tab stays inside the card
       this.keyListener = (e: KeyboardEvent) => {
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           e.stopPropagation();
           finish({ decision: "allow", duration: durationValue(), profileId: selectedProfileId });
-        } else if (e.key === "Escape") {
+          return;
+        }
+        if (e.key === "Escape") {
           e.preventDefault();
           e.stopPropagation();
           finish({ decision: "deny", duration: durationValue(), profileId: selectedProfileId });
+          return;
+        }
+        if (e.key === "Tab") {
+          const card = container.querySelector<HTMLElement>(".mw-card");
+          if (!card) return;
+          const focusables = Array.from(card.querySelectorAll<HTMLElement>("button"));
+          if (focusables.length === 0) return;
+          const first = focusables[0];
+          const last = focusables[focusables.length - 1];
+          const active = shadow.activeElement;
+          if (e.shiftKey && (active === first || active === card)) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && active === last) {
+            e.preventDefault();
+            first.focus();
+          } else if (active !== card && !card.contains(active)) {
+            e.preventDefault();
+            first.focus();
+          }
         }
       };
       window.addEventListener("keydown", this.keyListener, true);
 
       document.documentElement.appendChild(host);
       shadow.appendChild(container);
+      (container.querySelector<HTMLElement>(".mw-card"))?.focus();
       this.host = host;
     });
   }

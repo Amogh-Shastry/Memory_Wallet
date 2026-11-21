@@ -8,6 +8,34 @@ const isProd = process.argv.includes("--production");
 
 mkdirSync("dist", { recursive: true });
 
+// Clean the directories this script owns. Without this, files removed from the
+// build (an unused wasm build, an old screenshot profile, a deleted bundle)
+// stay in dist/ forever and ship in the store zip.
+for (const dir of ["popup", "options", "background", "content", "offscreen", "assets", "test"]) {
+  rmSync(join("dist", dir), { recursive: true, force: true });
+}
+
+// The embedding model ships inside the package. There is no runtime download,
+// so a build without it would ship a silently-degraded extension — fail loudly.
+const MODEL_SRC = join("models", "all-MiniLM-L6-v2");
+const MODEL_FILES = [
+  "config.json",
+  "special_tokens_map.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "vocab.txt",
+  "onnx/model_quantized.onnx",
+];
+const missingModel = MODEL_FILES.filter((f) => !existsSync(join(MODEL_SRC, f)));
+if (missingModel.length > 0) {
+  console.error(
+    `\n[build] Bundled embedding model is incomplete in ${MODEL_SRC}:\n` +
+      missingModel.map((f) => `  ✗ ${f}`).join("\n") +
+      "\n\nRun `npm run fetch:model` once (needs internet), then rebuild.\n",
+  );
+  process.exit(1);
+}
+
 /** @type {import('esbuild').BuildOptions} */
 const shared = {
   bundle: true,
@@ -15,6 +43,7 @@ const shared = {
   sourcemap: isProd ? false : "inline",
   logLevel: "info",
   target: ["chrome120"],
+  loader: { ".woff2": "dataurl" },
 };
 
 const pages = [
@@ -62,19 +91,29 @@ await build({
 
 cpSync("src/offscreen/offscreen.html", join("dist", "offscreen", "offscreen.html"));
 
+// Ship the hash-pinned embedding model with the extension — no CDN, no
+// first-run download, no network request from the browser at any point.
+cpSync(MODEL_SRC, join("dist", "offscreen", "models", "all-MiniLM-L6-v2"), { recursive: true });
+
 // ONNX Runtime wasm binaries are served from the extension itself — no CDN.
+// Extension pages are NOT cross-origin isolated, so ORT cannot use threads and
+// dynamically imports the "asyncify" build instead. Shipping only the plain
+// pair made every real install fail with "no available backend found".
+// JSEP/WebGPU and JSPI are unused, so those pairs stay out of the package.
 mkdirSync(join("dist", "offscreen", "wasm"), { recursive: true });
-for (const f of [
-  "ort-wasm-simd-threaded.mjs",
-  "ort-wasm-simd-threaded.wasm",
-  "ort-wasm-simd-threaded.jsep.mjs",
-  "ort-wasm-simd-threaded.jsep.wasm",
-]) {
-  cpSync(join("node_modules", "onnxruntime-web", "dist", f), join("dist", "offscreen", "wasm", f));
+for (const base of ["ort-wasm-simd-threaded", "ort-wasm-simd-threaded.asyncify"]) {
+  for (const ext of ["mjs", "wasm"]) {
+    const f = `${base}.${ext}`;
+    cpSync(join("node_modules", "onnxruntime-web", "dist", f), join("dist", "offscreen", "wasm", f));
+  }
 }
 
 cpSync("src/manifest.json", join("dist", "manifest.json"));
+cpSync("src/managed-schema.json", join("dist", "managed-schema.json"));
 cpSync("src/assets", join("dist", "assets"), { recursive: true });
+
+/* Fonts are bundled and inlined by esbuild (see src/ui/fonts.css).
+   No <link> to a font CDN — the extension must never phone home. */
 
 writeFileSync(
   join("dist", "popup", "popup.html"),
@@ -118,10 +157,15 @@ if (process.argv.includes("--zip")) {
   const tmp = join("dist-store");
   if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
-  // Copy everything except dist/test (harness must not be in store zip)
+  // Copy everything except local-only artifacts: the visual harness (test/) and
+  // demo video renders (demo/). Neither belongs in a store package.
+  const EXCLUDE = ["/test", "/demo"];
   cpSync("dist", tmp, {
     recursive: true,
-    filter: (src) => !src.replaceAll("\\", "/").includes("/test") && !src.endsWith("/test"),
+    filter: (src) => {
+      const p = src.replaceAll("\\", "/");
+      return !EXCLUDE.some((x) => p.includes(`${x}/`) || p.endsWith(x));
+    },
   });
   // Remove test folder if it slipped through
   const testInTmp = join(tmp, "test");

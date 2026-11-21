@@ -47,15 +47,18 @@ export class QueryDetector {
     this.observer = new MutationObserver(() => this.scheduleCheck());
     this.observer.observe(document.body, { childList: true, subtree: true });
 
-    document.addEventListener("keydown", this.handleKeydown, true);
-    document.addEventListener("click", this.handleClick, true);
+    // Capture on window, not document: ChatGPT registers its own document-level
+    // capture handler during page load, which ran first and sent the message
+    // before we could pause it. Window capture is earlier in the path.
+    window.addEventListener("keydown", this.handleKeydown, true);
+    window.addEventListener("click", this.handleClick, true);
   }
 
   stop(): void {
     this.observer?.disconnect();
     this.observer = null;
-    document.removeEventListener("keydown", this.handleKeydown, true);
-    document.removeEventListener("click", this.handleClick, true);
+    window.removeEventListener("keydown", this.handleKeydown, true);
+    window.removeEventListener("click", this.handleClick, true);
   }
 
   get currentLastQuery(): string {
@@ -87,7 +90,6 @@ export class QueryDetector {
     e.preventDefault();
     e.stopImmediatePropagation();
     this.lastQuery = draft;
-    console.info(`[Memory Wallet] send intercepted (${draft.length} chars)`);
     this.handlers.onQueryNeedsWallet(draft, true);
   };
 
@@ -102,7 +104,6 @@ export class QueryDetector {
     e.preventDefault();
     e.stopImmediatePropagation();
     this.lastQuery = draft;
-    console.info(`[Memory Wallet] send intercepted (${draft.length} chars)`);
     this.handlers.onQueryNeedsWallet(draft, true);
   };
 
@@ -135,7 +136,6 @@ export class QueryDetector {
     if (query.includes(CONTEXT_MARKER)) return; // our own injected send
     if (query === this.lastQuery && snapshot === "") return; // mutation echo
     this.lastQuery = query;
-    console.info(`[Memory Wallet] question detected (${query.length} chars)`);
     this.handlers.onQueryNeedsWallet(query, false);
   }
 }

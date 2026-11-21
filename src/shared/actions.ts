@@ -1,15 +1,19 @@
-import type { AccessLevel, Memory, MemoryCategory, Profile } from "./types";
+import type { AccessLevel, Memory, MemoryCategory, MemoryOrigin, Profile, WalletState } from "./types";
 import {
   clearAllData,
+  ensureSeeded,
   getMemories,
   getProfiles,
   getSettings,
+  getState,
+  removeDemoData,
   saveMemories,
   saveProfiles,
   saveSettings,
 } from "./storage";
-import { DEMO_DATA, demoDescription } from "./demoData";
-import { nowISO, uid } from "./constants";
+import { DEMO_DATA, DEFAULT_AI_APPS, createDefaultProfiles, demoDescription } from "./demoData";
+import { inferCategoriesFromQuery } from "./classify";
+import { DEMO_SEED_KEY, nowISO, uid } from "./constants";
 
 export async function createProfile(
   name: string,
@@ -71,6 +75,8 @@ export async function addMemory(input: {
   content: string;
   category: MemoryCategory;
   importance: number;
+  origin?: MemoryOrigin;
+  context?: string;
 }): Promise<Memory> {
   const memories = await getMemories();
   const t = nowISO();
@@ -82,6 +88,8 @@ export async function addMemory(input: {
     importance: input.importance,
     createdAt: t,
     updatedAt: t,
+    origin: input.origin ?? "manual",
+    context: input.context,
   };
   memories.push(memory);
   await saveMemories(memories);
@@ -121,6 +129,8 @@ export async function loadDemoData(): Promise<void> {
   const memories = await getMemories();
   let startupProfileId: string | null = null;
   let touched = false;
+  const seededMemoryIds: string[] = [];
+  const seededProfileIds: string[] = [];
 
   for (const [name, specs] of Object.entries(DEMO_DATA)) {
     let profile = profiles.find((p) => p.name === name);
@@ -135,6 +145,7 @@ export async function loadDemoData(): Promise<void> {
         updatedAt: nowISO(),
       };
       profiles.push(profile);
+      seededProfileIds.push(profile.id);
     }
     const existingProfileMemories = memories.filter((m) => m.profileId === profile.id);
     if (existingProfileMemories.length > 0) {
@@ -143,18 +154,19 @@ export async function loadDemoData(): Promise<void> {
     }
     if (name === "Startup") startupProfileId = profile.id;
 
-    const existingContents = new Set(existingProfileMemories.map((m) => m.content));
     for (const spec of specs) {
-      if (existingContents.has(spec.content)) continue;
       const t = nowISO();
+      const id = uid("mem");
+      seededMemoryIds.push(id);
       memories.push({
-        id: uid("mem"),
+        id,
         profileId: profile.id,
         content: spec.content,
         category: spec.category,
         importance: spec.importance,
         createdAt: t,
         updatedAt: t,
+        origin: "demo",
       });
       touched = true;
     }
@@ -165,8 +177,25 @@ export async function loadDemoData(): Promise<void> {
   await saveProfiles(profiles);
   await saveMemories(memories);
 
+  // Record exact IDs so cleanup can never miss sample data again, even if a
+  // future migration changes how origins or content markers are handled.
+  const previous = (await chrome.storage.local.get(DEMO_SEED_KEY))[DEMO_SEED_KEY] as
+    | { memoryIds?: string[]; profileIds?: string[] }
+    | undefined;
+  await chrome.storage.local.set({
+    [DEMO_SEED_KEY]: {
+      memoryIds: [...(previous?.memoryIds ?? []), ...seededMemoryIds],
+      profileIds: [...(previous?.profileIds ?? []), ...seededProfileIds],
+    },
+  });
+
   // Point the wallet at Startup so the demo flow works immediately.
   if (startupProfileId) await saveSettings({ activeProfileId: startupProfileId });
+}
+
+/** Explicit cleanup from Settings — removes only sample data. */
+export async function clearDemoData(): Promise<{ memories: number; profiles: number }> {
+  return removeDemoData();
 }
 
 /** Reopen the first-run wizard on next dashboard open (data untouched). */
@@ -174,9 +203,47 @@ export async function reopenOnboarding(): Promise<void> {
   await saveSettings({ onboardingDone: false });
 }
 
-/** Wipe everything and restore defaults (used by Settings). */
+/** Wipe everything and restore a clean, usable wallet (used by Settings). */
 export async function factoryReset(): Promise<void> {
   await clearAllData();
+  // Re-seed so the extension is immediately usable again: without this the
+  // wallet had no profiles and no active profile until the next worker start.
+  await ensureSeeded(DEFAULT_AI_APPS, createDefaultProfiles());
+}
+
+/* ------------------------------------------------------------------ */
+/* Export                                                             */
+/* ------------------------------------------------------------------ */
+
+export interface WalletExport {
+  format: "memory-wallet-export";
+  version: 1;
+  exportedAt: string;
+  profiles: WalletState["profiles"];
+  memories: WalletState["memories"];
+  permissions: WalletState["permissions"];
+  requests: WalletState["requests"];
+  settings: WalletState["settings"];
+}
+
+/**
+ * Everything the wallet knows, as a portable JSON document. Deliberately
+ * includes settings and the request log: "you can see and take everything"
+ * is the product promise, and an export that hides data would undercut it.
+ */
+export async function exportAllData(): Promise<string> {
+  const state = await getState();
+  const doc: WalletExport = {
+    format: "memory-wallet-export",
+    version: 1,
+    exportedAt: nowISO(),
+    profiles: state.profiles,
+    memories: state.memories,
+    permissions: state.permissions,
+    requests: state.requests,
+    settings: state.settings,
+  };
+  return JSON.stringify(doc, null, 2);
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,8 +424,8 @@ export interface ImportResult {
 export async function importMemoriesIntoProfile(
   profileId: string,
   contents: string[],
+  origin: MemoryOrigin = "import",
 ): Promise<ImportResult> {
-  const { inferCategoriesFromQuery } = await import("./retrieval");
   const memories = await getMemories();
   const existing = new Set(
     memories.filter((m) => m.profileId === profileId).map((m) => m.content.toLowerCase()),
@@ -384,6 +451,7 @@ export async function importMemoriesIntoProfile(
       importance: 0.7,
       createdAt: t,
       updatedAt: t,
+      origin,
     });
     imported++;
   }

@@ -31,8 +31,10 @@ export const CATEGORY_LABELS: Record<MemoryCategory, string> = {
   other: "Other",
 };
 
-export const STORAGE_VERSION = 1;
+export const STORAGE_VERSION = 4;
 export const STORAGE_VERSION_KEY = "mw_storage_version";
+/** Exact IDs of sample data written by loadDemoData, for reliable cleanup. */
+export const DEMO_SEED_KEY = "mw_demo_seed";
 
 export const DEFAULT_SETTINGS: Settings = {
   localOnlyMode: true,
@@ -44,6 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
   allowGeneralFallback: false,
   semanticSearch: true,
   onboardingDone: false,
+  requireApproval: false,
 };
 
 /** Keywords used to infer which memory categories a user query touches. */
@@ -52,7 +55,15 @@ export const CATEGORY_HINTS: Record<MemoryCategory, string[]> = {
     "who am i",
     "about me",
     "my name",
+    "name",
     "i am",
+    "introduce",
+    "introduction",
+    "intro",
+    "networking",
+    "meet people",
+    "bio",
+    "background",
     // Education & study decisions.
     "masters",
     "postgrad",

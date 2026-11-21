@@ -17,12 +17,18 @@ import {
 } from "../shared/vectorStore";
 import { nowISO } from "../shared/constants";
 import { EMBED_MSG } from "../shared/messages";
+import type { Memory } from "../shared/types";
+
+/** Embed the section heading with the fact so "faculty outreach" matches the
+ *  whole section, not only memories that repeat those words in their text. */
+function embedText(memory: Memory): string {
+  return memory.context ? `[${memory.context}] ${memory.content}` : memory.content;
+}
 
 const OFFSCREEN_URL = "offscreen/offscreen.html";
 
 export interface EmbedStatus {
-  state: "idle" | "downloading" | "ready" | "error";
-  pct?: number;
+  state: "idle" | "indexing" | "ready" | "error";
   indexed?: number;
   total?: number;
   error?: string;
@@ -57,11 +63,20 @@ export async function ensureOffscreen(): Promise<boolean> {
 
 let seq = 0;
 const pending = new Map<number, (vectors: number[][] | null) => void>();
+let lastEmbedError: string | null = null;
 
-export function handleEmbedResult(message: { type?: string; reqId?: number; ok?: boolean; vectors?: number[][] }): boolean {
+/** The offscreen host sends the real failure reason; surface it in status. */
+export function takeEmbedError(): string | null {
+  const error = lastEmbedError;
+  lastEmbedError = null;
+  return error;
+}
+
+export function handleEmbedResult(message: { type?: string; reqId?: number; ok?: boolean; vectors?: number[][]; error?: string }): boolean {
   if (message?.type !== EMBED_MSG.EMBED_RESULT) return false;
   const resolve = pending.get(message.reqId ?? -1);
   pending.delete(message.reqId ?? -1);
+  if (!message.ok) lastEmbedError = message.error ?? "embedding failed";
   resolve?.(message.ok ? (message.vectors ?? null) : null);
   return true;
 }
@@ -106,7 +121,7 @@ export async function ensureIndex(force = false): Promise<void> {
 
     // Re-embed missing or changed memories.
     const stale = memories.filter(
-      (m) => force || !byId.has(m.id) || byId.get(m.id)!.contentHash !== hashContent(m.content),
+      (m) => force || !byId.has(m.id) || byId.get(m.id)!.contentHash !== hashContent(embedText(m)),
     );
 
     if (stale.length === 0) {
@@ -115,24 +130,27 @@ export async function ensureIndex(force = false): Promise<void> {
     }
 
     await setEmbedStatus({
-      state: "downloading",
+      state: "indexing",
       indexed: memories.length - stale.length,
       total: memories.length,
     });
 
     for (let i = 0; i < stale.length; i += 16) {
       const batch = stale.slice(i, i + 16);
-      // First call may include the one-time model download — generous timeout.
+      // First call loads the bundled model from disk — generous, but bounded.
       const vectors = await embedTexts(
-        batch.map((m) => m.content),
-        120000,
+        batch.map(embedText),
+        30000,
       );
       if (!vectors) {
+        const detail = takeEmbedError();
         await setEmbedStatus({
           state: "error",
           indexed: i,
           total: memories.length,
-          error: "embedding unavailable (offline or model failed to load)",
+          error: detail
+            ? `Embedding failed: ${detail.slice(0, 240)}`
+            : "embedding unavailable (offline or model failed to load)",
         });
         return;
       }
@@ -141,12 +159,12 @@ export async function ensureIndex(force = false): Promise<void> {
           memoryId: m.id,
           profileId: m.profileId,
           vector: vectors[j] ?? [],
-          contentHash: hashContent(m.content),
+          contentHash: hashContent(embedText(m)),
           updatedAt: nowISO(),
         })),
       );
       await setEmbedStatus({
-        state: "downloading",
+        state: "indexing",
         indexed: i + batch.length,
         total: memories.length,
       });

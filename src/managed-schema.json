@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "properties": {
+    "RequireApproval": {
+      "type": "boolean",
+      "title": "Require approval before sharing memory",
+      "description": "Always show the permission card before memory is shared, even when a standing grant exists for this AI app and profile."
+    },
+    "MaxMemoriesPerRequest": {
+      "type": "integer",
+      "title": "Maximum memories per request",
+      "description": "Upper bound on how many memories may be included in one shared context block.",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "DisableSemanticSearch": {
+      "type": "boolean",
+      "title": "Disable on-device semantic search",
+      "description": "Restrict matching to keyword and category scoring. All matching stays on the device either way."
+    },
+    "DisableGeneralFallback": {
+      "type": "boolean",
+      "title": "Disable general-memory fallback",
+      "description": "When nothing matches a question, share nothing instead of filling the request with the strongest general memories."
+    }
+  }
+}

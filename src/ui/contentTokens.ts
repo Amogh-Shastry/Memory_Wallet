@@ -5,6 +5,10 @@
  * sync with tokens.css without duplication.
  */
 export const CONTENT_TOKENS_CSS = `
+/* ── font families ── */
+--font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+--font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
 /* ── surfaces ── */
 --bg: #090a0f;
 --bg-subtle: #0e0f17;

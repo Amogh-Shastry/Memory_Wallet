@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useWalletState } from "../ui/hooks";
+import { BrandMark } from "../ui/BrandMark";
 import { memoryCountFor, relativeTime } from "../ui/format";
 import {
   addMemory,
@@ -24,11 +25,13 @@ import {
   IconZap,
 } from "../ui/icons";
 import type { MemoryCategory, RequestStatus } from "../shared/types";
+import { KNOW_ME_PROMPT } from "../shared/extract";
 
 const STATUS_META: Record<RequestStatus, { label: string; cls: string }> = {
-  approved: { label: "Signed ✓", cls: "chip chip-allow" },
+  approved: { label: "Allowed ✓", cls: "chip chip-allow" },
   denied: { label: "Denied ✗", cls: "chip chip-deny" },
   pending: { label: "Pending ⏳", cls: "chip chip-pending" },
+  cancelled: { label: "Cancelled", cls: "chip chip-pending" },
 };
 
 const CATEGORIES: { id: MemoryCategory; label: string }[] = [
@@ -46,14 +49,15 @@ export function App() {
   const state = useWalletState();
   const [loadingDemo, setLoadingDemo] = useState(false);
   const [bgOk, setBgOk] = useState<boolean | null>(null);
-  const [activeTab, setActiveTab] = useState<"activity" | "vault">("activity");
+  const [activeTab, setActiveTab] = useState<"requests" | "memories">("requests");
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const [showAddDrawer, setShowAddDrawer] = useState(false);
-  const [copiedHash, setCopiedHash] = useState(false);
+  const [copiedPill, setCopiedPill] = useState(false);
+  const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null);
   const [copiedRequestId, setCopiedRequestId] = useState<string | null>(null);
 
-  // Search & Filter in Vault Tab
+  // Search & Filter in Memories tab
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
 
@@ -69,6 +73,15 @@ export function App() {
       .then((res) => setBgOk(Boolean(res?.ok)))
       .catch(() => setBgOk(false));
   }, []);
+
+  useEffect(() => {
+    if (!profileDropdownOpen) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setProfileDropdownOpen(false);
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [profileDropdownOpen]);
 
   const activeProfile = useMemo(() => {
     if (!state) return null;
@@ -116,14 +129,27 @@ export function App() {
   }
 
   const walletEmpty = state.memories.length === 0;
-  const addressHash = activeProfile
-    ? `0xMem…${activeProfile.id.slice(0, 4)}`
-    : "0xMem…0000";
+  const profileIdTag = activeProfile
+    ? activeProfile.id.startsWith("profile_")
+      ? `#${activeProfile.id.replace(/^profile_/, "")}`
+      : `#${activeProfile.id.slice(0, 8)}`
+    : "#default";
 
   async function handleLoadDemo() {
     setLoadingDemo(true);
     await loadDemoData();
     setLoadingDemo(false);
+  }
+
+  async function handleCopyPrompt() {
+    try {
+      await navigator.clipboard.writeText(KNOW_ME_PROMPT);
+      setCopiedPrompt(true);
+      setTimeout(() => setCopiedPrompt(false), 2000);
+    } catch {
+      // Clipboard can be blocked in some contexts; setup shows the prompt too.
+      await handleGetStarted();
+    }
   }
 
   function openSettings() {
@@ -139,13 +165,13 @@ export function App() {
     chrome.runtime.openOptionsPage();
   }
 
-  function handleCopyAddress() {
+  function handleCopyProfileDetails() {
     if (!activeProfile) return;
     void navigator.clipboard.writeText(
-      `[Memory Wallet Identity]\nProfile: ${activeProfile.name} (${activeProfile.id})\nMemories: ${activeProfileMemories.length}\nHash: ${activeProfile.id}`,
+      `[Memory Wallet]\nProfile: ${activeProfile.name} (${activeProfile.id})\nMemories: ${activeProfileMemories.length}`,
     );
-    setCopiedHash(true);
-    setTimeout(() => setCopiedHash(false), 2000);
+    setCopiedPill(true);
+    setTimeout(() => setCopiedPill(false), 2000);
   }
 
   async function handleSaveNewMemory() {
@@ -168,7 +194,7 @@ export function App() {
   async function handleCopyRequestContext(req: (typeof recentRequests)[number]) {
     const matched = state!.memories.filter((m) => req.matchedMemoryIds?.includes(m.id));
     const profile = state!.profiles.find((p) => p.id === req.profileId);
-    const text = `[Memory Wallet Context Signature]\nApp: ${req.aiApplicationId}\nProfile: ${profile?.name ?? "Unknown"}\nStatus: ${req.status.toUpperCase()}\nTimestamp: ${new Date(req.createdAt).toISOString()}\n\n${matched.map((m) => `• [${m.category}] ${m.content}`).join("\n")}\n[End Signature]`;
+    const text = `Memory Wallet — Request details\nApp: ${req.aiApplicationId}\nProfile: ${profile?.name ?? "Unknown"}\nStatus: ${req.status.toUpperCase()}\nTimestamp: ${new Date(req.createdAt).toISOString()}\n\n${matched.map((m) => `• [${m.category}] ${m.content}`).join("\n")}`;
     await navigator.clipboard.writeText(text);
     setCopiedRequestId(req.id);
     setTimeout(() => setCopiedRequestId(null), 2000);
@@ -179,187 +205,167 @@ export function App() {
       {/* ── Top Header: Engine Status & Controls ── */}
       <header className="header">
         <div className="brand" onClick={() => openDashboard("overview")} title="Open Memory Wallet Dashboard">
-          <div className="brand-logo-wrap">
-            <span className="brand-icon"><IconWallet size={18} /></span>
-          </div>
-          <div className="brand-info">
-            <div className="brand-title-row">
-              <span className="brand-title">Memory Wallet</span>
-              <span className="brand-version">v1.0</span>
-            </div>
-            <p className="brand-tagline">AI Sovereign Memory Layer</p>
-          </div>
+          <BrandMark size={28} className="brand-mark" />
+          <span className="brand-title">Memory Wallet</span>
         </div>
 
         <div className="header-actions">
           <div
-            className={`network-badge ${bgOk === true ? "active" : bgOk === false ? "error" : "checking"}`}
+            className={`status-badge ${bgOk === true ? "active" : bgOk === false ? "error" : "checking"}`}
             title={
               bgOk
-                ? "Neural Vector Engine: Active (100% On-Device & Private)"
-                : "Vector Engine Offline — Reload Extension"
+                ? "Wallet running — everything stays on this device"
+                : "Background not responding — reload the extension"
             }
           >
-            <span className="network-dot" />
-            <span className="network-text">{bgOk === false ? "Offline" : "Local Engine"}</span>
+            <span className="status-dot" />
+            <span className="status-text">{bgOk === false ? "Offline" : "Local only"}</span>
           </div>
           <button
-            className="btn-icon header-btn"
+            className="header-btn"
             title="Settings & Config"
             aria-label="Settings"
             onClick={openSettings}
           >
-            <IconSliders size={15} />
+            <IconSliders size={14} />
           </button>
         </div>
       </header>
 
       {walletEmpty ? (
-        <section className="empty-vault-card anim-scale-in">
+        <section className="empty-memory-card anim-scale-in">
           <div className="empty-glow-ring">
             <IconLock size={32} />
           </div>
-          <h2 className="empty-title">Initialize Memory Vault</h2>
+          <h2 className="empty-title">Start with what your AI knows</h2>
           <p className="empty-desc">
-            Your private, sovereign context store. Connect your memories to ChatGPT, Claude, and AI apps with cryptographic privacy.
+            Ask ChatGPT or Claude to list everything it remembers about you, paste the answer, and
+            check each line. No JSON export, no settings page. Everything stays on this device.
           </p>
           <div className="empty-actions">
             <button className="btn btn-primary" onClick={() => void handleGetStarted()}>
-              <IconZap size={15} /> Get started
+              <IconZap size={15} /> Set up my memory
+            </button>
+            <button className="btn btn-secondary" onClick={() => void handleCopyPrompt()}>
+              <IconCopy size={14} /> {copiedPrompt ? "Copied prompt" : "Copy the prompt"}
             </button>
             <button
               className="btn btn-secondary"
               onClick={() => void handleLoadDemo()}
               disabled={loadingDemo}
             >
-              {loadingDemo ? "Generating Demo…" : "Load Sample Persona"}
+              {loadingDemo ? "Generating Demo…" : "Load sample data"}
             </button>
           </div>
         </section>
       ) : (
         <>
-          {/* ── MetaMask-Style Account / Persona Vault Card ── */}
-          <section className="account-card anim-slide-down">
-            <div className="account-top">
-              <div className="account-avatar-wrap">
-                <span className="account-avatar">{activeProfile?.icon || "📁"}</span>
-                <span className="account-avatar-glow" />
-              </div>
-
-              <div className="account-details">
-                {/* Profile Switcher Trigger */}
-                <div className="profile-selector-container">
-                  <button
-                    className="profile-selector-btn"
-                    onClick={() => setProfileDropdownOpen(!profileDropdownOpen)}
-                    title="Switch Active Profile"
-                  >
-                    <span className="profile-current-name">{activeProfile?.name || "Select Profile"}</span>
-                    <IconChevronDown
-                      size={14}
-                      className={`selector-chevron ${profileDropdownOpen ? "open" : ""}`}
-                    />
-                  </button>
-
-                  {/* Dropdown Menu */}
-                  {profileDropdownOpen && (
-                    <div className="profile-dropdown-menu anim-pop-in">
-                      <div className="dropdown-header">
-                        <span>Switch Persona Profile</span>
-                        <button
-                          className="dropdown-close-btn"
-                          onClick={() => setProfileDropdownOpen(false)}
-                        >
-                          <IconX size={12} />
-                        </button>
-                      </div>
-                      <ul className="dropdown-list">
-                        {state.profiles.map((p) => {
-                          const isSel = p.id === activeProfile?.id;
-                          const count = memoryCountFor(state, p.id);
-                          return (
-                            <li key={p.id}>
-                              <button
-                                className={`dropdown-item ${isSel ? "active" : ""}`}
-                                onClick={() => {
-                                  void setActiveProfile(p.id);
-                                  setProfileDropdownOpen(false);
-                                }}
-                              >
-                                <span className="dropdown-item-icon">{p.icon}</span>
-                                <div className="dropdown-item-text">
-                                  <span className="dropdown-item-name">{p.name}</span>
-                                  <span className="dropdown-item-count">{count} memories</span>
-                                </div>
-                                {isSel && <IconCheck size={14} className="dropdown-item-check" />}
-                              </button>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                      <div className="dropdown-footer">
-                        <button
-                          className="btn-link-small"
-                          onClick={() => {
-                            setProfileDropdownOpen(false);
-                            openDashboard("profiles");
-                          }}
-                        >
-                          <IconPlus size={13} /> Manage / Create Profiles
-                        </button>
-                      </div>
-                    </div>
-                  )}
+          {/* ── Active Profile Workspace Bar ── */}
+          <section className={`profile-bar anim-fade-in ${profileDropdownOpen ? "menu-open" : ""}`}>
+            <div className="profile-selector-container">
+              <button
+                className="profile-selector-btn"
+                onClick={() => state.profiles.length > 1 && setProfileDropdownOpen(!profileDropdownOpen)}
+                title={state.profiles.length > 1 ? "Switch Active Profile" : "Your memory"}
+                aria-expanded={state.profiles.length > 1 && profileDropdownOpen}
+                aria-controls="profile-menu"
+                disabled={state.profiles.length <= 1}
+              >
+                <span className="profile-avatar">{activeProfile?.icon || "📁"}</span>
+                <div className="profile-meta">
+                  <span className="profile-current-name">{activeProfile?.name || "Select Profile"}</span>
+                  <span className="profile-sub">
+                    {activeProfileMemories.length} {activeProfileMemories.length === 1 ? "memory" : "memories"} ·{" "}
+                    <span
+                      className="profile-tag-click"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCopyProfileDetails();
+                      }}
+                      title="Click to copy profile details"
+                    >
+                      {copiedPill ? "Copied ✓" : profileIdTag}
+                    </span>
+                  </span>
                 </div>
+                {state.profiles.length > 1 && (
+                  <IconChevronDown
+                    size={13}
+                    className={`selector-chevron ${profileDropdownOpen ? "open" : ""}`}
+                  />
+                )}
+              </button>
+            </div>
 
-                {/* Address Hash Pill */}
-                <button
-                  className="address-hash-pill"
-                  onClick={handleCopyAddress}
-                  title="Copy Profile Context Address"
+            <button
+              className={`btn-quick-add ${showAddDrawer ? "active" : ""}`}
+              onClick={() => setShowAddDrawer(!showAddDrawer)}
+              title="Add memory to active profile"
+            >
+              <IconPlus size={13} />
+              <span>Add</span>
+            </button>
+
+            {/* Dropdown backdrop + menu — only meaningful with multiple profiles */}
+            {state.profiles.length > 1 && profileDropdownOpen && (
+              <>
+                <div
+                  className="profile-dropdown-backdrop"
+                  onClick={() => setProfileDropdownOpen(false)}
+                  aria-hidden="true"
+                />
+                <div
+                  id="profile-menu"
+                  className="profile-dropdown-menu anim-pop-in"
                 >
-                  <span className="hash-code">{addressHash}</span>
-                  {copiedHash ? (
-                    <span className="copied-text"><IconCheck size={11} /> Copied</span>
-                  ) : (
-                    <IconCopy size={11} className="copy-icon" />
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {/* Account Balance & Stats */}
-            <div className="account-balance-row">
-              <div className="balance-stat">
-                <span className="balance-number">{activeProfileMemories.length}</span>
-                <span className="balance-label">Memories Stored</span>
-              </div>
-              <div className="balance-divider" />
-              <div className="balance-stat">
-                <span className="balance-number">{state.aiApplications.length}</span>
-                <span className="balance-label">Connected AI Apps</span>
-              </div>
-            </div>
-
-            {/* Account Quick Action Buttons */}
-            <div className="account-actions-row">
-              <button
-                className={`action-pill ${showAddDrawer ? "active" : ""}`}
-                onClick={() => setShowAddDrawer(!showAddDrawer)}
-                title="Add memory to active profile"
-              >
-                <IconPlus size={14} />
-                <span>Add Memory</span>
-              </button>
-              <button
-                className="action-pill primary"
-                onClick={() => openDashboard("overview")}
-                title="Open Full Management Dashboard"
-              >
-                <IconExternal size={14} />
-                <span>Open Vault</span>
-              </button>
-            </div>
+                  <div className="dropdown-header">
+                    <span>Switch profile</span>
+                    <button
+                      className="dropdown-close-btn"
+                      onClick={() => setProfileDropdownOpen(false)}
+                      aria-label="Close profile menu"
+                    >
+                      <IconX size={12} />
+                    </button>
+                  </div>
+                  <ul className="dropdown-list">
+                    {state.profiles.map((p) => {
+                      const isSel = p.id === activeProfile?.id;
+                      const count = memoryCountFor(state, p.id);
+                      return (
+                        <li key={p.id}>
+                          <button
+                            className={`dropdown-item ${isSel ? "active" : ""}`}
+                            onClick={() => {
+                              void setActiveProfile(p.id);
+                              setProfileDropdownOpen(false);
+                            }}
+                          >
+                            <span className="dropdown-item-icon">{p.icon}</span>
+                            <div className="dropdown-item-text">
+                              <span className="dropdown-item-name">{p.name}</span>
+                              <span className="dropdown-item-count">{count} memories</span>
+                            </div>
+                            {isSel && <IconCheck size={14} className="dropdown-item-check" />}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <div className="dropdown-footer">
+                    <button
+                      className="btn-link-small"
+                      onClick={() => {
+                        setProfileDropdownOpen(false);
+                        openDashboard("profiles");
+                      }}
+                    >
+                      <IconPlus size={13} /> Manage Profiles
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </section>
 
           {/* ── Inline Quick-Add Memory Drawer ── */}
@@ -411,41 +417,41 @@ export function App() {
             </section>
           )}
 
-          {/* ── Navigation Tabs: Activity Ledger vs Vault Assets ── */}
+          {/* ── Navigation Tabs: Requests vs Memories ── */}
           <div className="tab-switcher">
             <button
-              className={`tab-btn ${activeTab === "activity" ? "active" : ""}`}
-              onClick={() => setActiveTab("activity")}
+              className={`tab-btn ${activeTab === "requests" ? "active" : ""}`}
+              onClick={() => setActiveTab("requests")}
             >
               <IconActivity size={14} />
-              <span>Activity Ledger</span>
+              <span>Requests</span>
               {recentRequests.length > 0 && (
                 <span className="tab-count">{recentRequests.length}</span>
               )}
             </button>
             <button
-              className={`tab-btn ${activeTab === "vault" ? "active" : ""}`}
-              onClick={() => setActiveTab("vault")}
+              className={`tab-btn ${activeTab === "memories" ? "active" : ""}`}
+              onClick={() => setActiveTab("memories")}
             >
               <IconLock size={14} />
-              <span>Vault Assets</span>
+              <span>Memories</span>
               <span className="tab-count">{activeProfileMemories.length}</span>
             </button>
           </div>
 
-          {/* ── Tab Content: Activity Ledger ── */}
-          {activeTab === "activity" && (
+          {/* ── Tab Content: Requests ── */}
+          {activeTab === "requests" && (
             <section className="tab-pane anim-fade-in">
               {recentRequests.length === 0 ? (
                 <div className="empty-tab-state">
                   <span className="empty-tab-icon"><IconActivity size={22} /></span>
                   <p className="empty-tab-text">No memory access requests yet.</p>
                   <p className="empty-tab-sub">
-                    Ask a question on ChatGPT or Claude to trigger local context signing.
+                    Ask a question on ChatGPT or Claude to show a permission request here.
                   </p>
                 </div>
               ) : (
-                <ul className="request-ledger-list anim-stagger">
+                <ul className="request-list anim-stagger">
                   {recentRequests.map((r) => {
                     const app = state.aiApplications.find((a) => a.id === r.aiApplicationId);
                     const profile = state.profiles.find((p) => p.id === r.profileId);
@@ -455,60 +461,75 @@ export function App() {
                     const isCopied = copiedRequestId === r.id;
 
                     return (
-                      <li key={r.id} className={`ledger-card ${isExpanded ? "expanded" : ""}`}>
+                      <li key={r.id} className={`request-card ${isExpanded ? "expanded" : ""}`}>
                         <div
-                          className="ledger-card-main"
+                          className="request-card-main"
+                          role="button"
+                          tabIndex={0}
+                          aria-expanded={isExpanded}
                           onClick={() =>
                             setExpandedRequestId(isExpanded ? null : r.id)
                           }
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              setExpandedRequestId(isExpanded ? null : r.id);
+                            }
+                          }}
                         >
-                          <div className="ledger-left">
-                            <div className="ledger-app-badge">
+                          <div className="request-left">
+                            <div className="request-app-badge">
                               <span className={`app-indicator ${r.aiApplicationId}`} />
                               <span className="app-name">{app?.name ?? r.aiApplicationId}</span>
                             </div>
-                            <span className="ledger-query" title={r.query}>
+                            <span className="request-query" title={r.query}>
                               "{r.query.slice(0, 48)}{r.query.length > 48 ? "…" : ""}"
                             </span>
                           </div>
 
-                          <div className="ledger-right">
-                            <span className={meta.cls}>{meta.label}</span>
-                            <span className="ledger-time">{relativeTime(r.createdAt)}</span>
+                          <div className="request-right">
+                            <div className="request-status-row">
+                              <span className={meta.cls}>{meta.label}</span>
+                              <IconChevronDown
+                                size={12}
+                                className={`request-chevron ${isExpanded ? "open" : ""}`}
+                              />
+                            </div>
+                            <span className="request-time">{relativeTime(r.createdAt)}</span>
                           </div>
                         </div>
 
-                        {/* Expanded Payload & Signature Details */}
+                        {/* Expanded request details */}
                         {isExpanded && (
-                          <div className="ledger-expanded-content anim-slide-down">
-                            <div className="ledger-detail-row">
+                          <div className="request-expanded-content anim-slide-down">
+                            <div className="request-detail-row">
                               <span className="detail-label">Full Prompt:</span>
                               <span className="detail-value">"{r.query}"</span>
                             </div>
-                            <div className="ledger-detail-row">
-                              <span className="detail-label">Persona Profile:</span>
+                            <div className="request-detail-row">
+                              <span className="detail-label">Profile:</span>
                               <span className="detail-value">
                                 {profile?.icon} {profile?.name}
                               </span>
                             </div>
-                            <div className="ledger-detail-row">
+                            <div className="request-detail-row">
                               <span className="detail-label">Context Injected:</span>
                               <span className="detail-value highlight">
                                 {matchedCount} {matchedCount === 1 ? "memory" : "memories"}
                               </span>
                             </div>
-                            <div className="ledger-actions-row">
+                            <div className="request-actions-row">
                               <button
                                 className="btn-small-ghost"
                                 onClick={() => void handleCopyRequestContext(r)}
                               >
                                 {isCopied ? (
                                   <>
-                                    <IconCheck size={12} /> Copied Signature
+                                    <IconCheck size={12} /> Copied ✓
                                   </>
                                 ) : (
                                   <>
-                                    <IconCopy size={12} /> Copy Context Payload
+                                    <IconCopy size={12} /> Copy details
                                   </>
                                 )}
                               </button>
@@ -516,7 +537,7 @@ export function App() {
                                 className="btn-small-ghost"
                                 onClick={() => openDashboard("requests")}
                               >
-                                View in Audit Log <IconExternal size={11} />
+                                View in Requests <IconExternal size={11} />
                               </button>
                             </div>
                           </div>
@@ -529,16 +550,16 @@ export function App() {
             </section>
           )}
 
-          {/* ── Tab Content: Vault Assets (Memories) ── */}
-          {activeTab === "vault" && (
+          {/* ── Tab Content: Memories ── */}
+          {activeTab === "memories" && (
             <section className="tab-pane anim-fade-in">
               {/* Search & Category Filter Bar */}
-              <div className="vault-filter-bar">
+              <div className="filter-bar">
                 <div className="search-input-wrap">
                   <IconSearch size={14} className="search-icon" />
                   <input
                     type="text"
-                    className="vault-search-input"
+                    className="search-input"
                     placeholder="Search memories in profile…"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
@@ -591,9 +612,9 @@ export function App() {
                   </button>
                 </div>
               ) : (
-                <ul className="vault-memory-list anim-stagger">
+                <ul className="memory-list anim-stagger">
                   {filteredMemories.map((m) => (
-                    <li key={m.id} className="vault-memory-item">
+                    <li key={m.id} className="memory-item">
                       <div className="memory-item-body">
                         <p className="memory-item-content">{m.content}</p>
                         <div className="memory-item-meta">
@@ -616,7 +637,7 @@ export function App() {
                           className="btn-icon-tiny danger"
                           title="Delete memory"
                           onClick={() => {
-                            if (window.confirm("Delete this memory from your vault?")) {
+                            if (window.confirm("Delete this memory from your wallet?")) {
                               void deleteMemory(m.id);
                             }
                           }}
@@ -637,7 +658,7 @@ export function App() {
               className="btn btn-secondary full-width"
               onClick={() => openDashboard("overview")}
             >
-              <IconWallet size={15} /> Open Full Management Dashboard
+              <IconWallet size={15} /> Open Dashboard
             </button>
           </footer>
         </>

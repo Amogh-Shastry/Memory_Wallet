@@ -1,10 +1,45 @@
 node_modules/
 dist/
+dist-site/
+site/.tmp/
 *.log
 scripts/.actions.mjs
 
 # Personal data — never commit
 chatgpt-memories.json
 import-files/
+scripts/fixtures/know-me-answer.md
+
+# Vendored embedding model — run `npm run fetch:model` (hash-pinned)
+models/
 
 dist.zip
+
+# Website (out of scope for the extension repo)
+site/
+scripts/site-*.mjs
+scripts/build-site.mjs
+.github/workflows/pages.yml
+
+# One-off probes and demo/recording tools
+scripts/probe*.mjs
+scripts/dumpRequests.mjs
+scripts/editDemo.mjs
+scripts/recordLiveDemo.mjs
+scripts/seekVideo.mjs
+scripts/captureGifFrames.mjs
+scripts/makeHeroGif.mjs
+scripts/testCat.ts
+scripts/demo/
+scripts/stage/
+src/test/demoStage.css
+src/test/demoStage.ts
+
+# Duplicate brand exports and loose artwork
+brand/
+Memory-Wallet-Brand-Pack/
+memory-wallet-brand/
+icon 1.png
+icon 2.png
+icon pack.png
+docs/font-poll/

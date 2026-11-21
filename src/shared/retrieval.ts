@@ -1,84 +1,43 @@
 import type { Memory, MemoryCategory, MemorySource } from "./types";
 import { getMemoriesForProfile, getSettings } from "./storage";
-import { CATEGORY_HINTS, CATEGORY_PRIORITY, QUERY_SYNONYMS } from "./constants";
+import { CATEGORY_PRIORITY, QUERY_SYNONYMS } from "./constants";
 import { getVectorsByProfile } from "./vectorStore";
 import { EMBED_MSG } from "./messages";
+import { inferCategoriesFromQuery } from "./classify";
+import { analyzeQuery, buildDf, isCompoundFalseFriend, scoreMatch, type RankDoc } from "./rank";
 
-const STOPWORDS = new Set([
-  "a","an","the","and","or","but","if","then","else","for","of","to","in","on","at","by",
-  "with","from","is","are","was","were","be","been","being","am","do","does","did","doing",
-  "have","has","had","i","me","my","mine","we","our","you","your","it","its","this","that",
-  "these","those","what","which","who","whom","how","when","where","why","should","could",
-  "would","will","can","use","using","used","am","about","as","into","over","under","not",
-]);
+export { inferCategoriesFromQuery } from "./classify";
 
-/** Minimum cosine similarity for a Tier-2 semantic match. */
-const SEMANTIC_THRESHOLD = 0.35;
-/** Never let a cold model delay the permission card. */
-const QUERY_EMBED_TIMEOUT_MS = 800;
+/** Minimum cosine similarity for a semantic match. */
+const SEMANTIC_THRESHOLD = 0.38;
+/** Above this, a semantic match outranks any keyword-only match. */
+const SEMANTIC_STRONG = 0.58;
+/** Cold-start budget for the local model — long enough that a worker wake-up
+ *  does not silently disable semantic ranking on the first question. */
+const QUERY_EMBED_TIMEOUT_MS = 6000;
 
-export function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length > 1 && !STOPWORDS.has(t));
+/** "What do you know about me?" and friends — answer from the profile itself. */
+function isProfileSummary(query: string): boolean {
+  return /\b(what do you know about me|what can you tell me about me|tell me about myself|who am i|summaris?e me|my profile)\b/i.test(query)
+    || /\b(know|remember)\b[\s\S]*\babout me\b/i.test(query)
+    || /\b(list|show|what) (all|every) (of )?(my )?memor(?:y|ies)\b/i.test(query)
+    || /\bmemor(?:y|ies) (do )?you have about me\b/i.test(query);
 }
 
-/**
- * Expand query tokens with curated synonyms so semantically close memories
- * match even with zero literal overlap ("masters" → education/degree/...).
- */
-function expandTokens(tokens: string[]): string[] {
-  const out = new Set(tokens);
-  for (const t of tokens) {
-    const synonyms = QUERY_SYNONYMS[t];
-    if (synonyms) for (const s of synonyms) out.add(s);
-  }
-  return [...out];
+/** "Which facts are outdated?" — use update history rather than topic matching. */
+function isTemporalQuery(query: string): boolean {
+  return /\b(outdated|stale|no longer (?:true|relevant)|old facts|what changed|which facts have changed)\b/i.test(query);
 }
 
-/** Infer which memory categories a query touches (keyword hints, no ML). */
-export function inferCategoriesFromQuery(query: string): MemoryCategory[] {
-  const q = query.toLowerCase();
-  const matched: MemoryCategory[] = [];
-  for (const [cat, hints] of Object.entries(CATEGORY_HINTS) as [MemoryCategory, string[]][]) {
-    if (hints.some((h) => q.includes(h))) matched.push(cat);
-  }
-  return matched;
+/** The bundled MiniLM model is English-only; non-English scripts need a
+ *  documented fallback instead of meaningless embeddings. */
+function isNonEnglish(query: string): boolean {
+  return /[\u00C0-\u024F\u3040-\u30FF\u3400-\u9FFF\u0400-\u04FF\uAC00-\uD7AF]/.test(query);
 }
 
 function categoryRank(category: MemoryCategory): number {
   const idx = CATEGORY_PRIORITY.indexOf(category);
   return idx === -1 ? CATEGORY_PRIORITY.length : idx;
-}
-
-function scoreMemory(
-  memory: Memory,
-  queryTokens: string[],
-  hintedCategories: MemoryCategory[],
-): number {
-  const memTokens = new Set(tokenize(memory.content));
-  let overlap = 0;
-  if (memTokens.size > 0 && queryTokens.length > 0) {
-    for (const t of queryTokens) {
-      if (memTokens.has(t)) overlap++;
-      else {
-        for (const m of memTokens) {
-          if (m.startsWith(t) || t.startsWith(m)) {
-            overlap += 0.5;
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  let score = (overlap / Math.sqrt(Math.max(queryTokens.length, 1))) * (0.5 + memory.importance);
-  if (hintedCategories.includes(memory.category)) {
-    score += 0.35 * memory.importance;
-  }
-  return score;
 }
 
 function cosine(a: number[], b: number[]): number {
@@ -113,7 +72,7 @@ async function embedQuery(query: string): Promise<number[] | null> {
 
 export interface RetrievedMemory extends Memory {
   score: number;
-  /** How this memory was selected: exact word hit, embedding, or general fill. */
+  /** How this memory was selected: exact phrase/word hit, embedding, or general fill. */
   source: MemorySource;
 }
 
@@ -123,18 +82,20 @@ export interface RetrievalDebug {
   general: number;
 }
 
+interface Hit {
+  memory: Memory;
+  score: number;
+  source: MemorySource;
+}
+
 /**
- * Hybrid retrieval from a single profile:
+ * Hybrid retrieval from a single profile.
  *
- * Tier 1 — keyword: token/synonym overlap × importance + category boost.
- * Tier 2 — semantic: local embedding cosine similarity (skipped silently
- *          when the model/index isn't ready or the setting is off).
- * Tier 3 — general: strongest remaining memories (category priority →
- *          importance → newest), used to fill remaining slots when allowed.
- *
- * Every memory carries `source` so previews and the injected block can be
- * honest about why each item was included. Only call AFTER approval
- * (previews are computed pre-approval but nothing leaves the device).
+ * Meaning comes first: the local embedding ranks by similarity, so a query
+ * "my background in AI" matches AI facts even with no shared words. Keyword
+ * evidence is phrase/anchor aware (see rank.ts) and can only add a memory —
+ * a single ambiguous word like "background" no longer wins on its own.
+ * General fill is last and opt-in.
  */
 export async function retrieveRelevantMemories(
   query: string,
@@ -142,43 +103,84 @@ export async function retrieveRelevantMemories(
   limit = 5,
 ): Promise<RetrievedMemory[]> {
   const memories = await getMemoriesForProfile(profileId);
+  if (memories.length === 0) return [];
   const settings = await getSettings();
 
-  const rawTokens = tokenize(query);
+  const priority = (a: Memory, b: Memory) => {
+    const rank = categoryRank(a.category) - categoryRank(b.category);
+    if (rank !== 0) return rank;
+    if (b.importance !== a.importance) return b.importance - a.importance;
+    return b.createdAt.localeCompare(a.createdAt);
+  };
+
+  if (isProfileSummary(query)) {
+    return [...memories].sort(priority).slice(0, limit).map((m) => ({
+      ...m, score: 0, source: "general" as const,
+    }));
+  }
+  if (isTemporalQuery(query)) {
+    const updated = memories
+      .filter((m) => (m.previousValues?.length ?? 0) > 0)
+      .sort((a, b) => (b.previousValues?.length ?? 0) - (a.previousValues?.length ?? 0));
+    if (updated.length > 0) {
+      return updated.slice(0, limit).map((m) => ({ ...m, score: 1, source: "keyword" as const }));
+    }
+    return [...memories].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, limit).map((m) => ({ ...m, score: 0, source: "general" as const }));
+  }
+
+  const nonEnglish = isNonEnglish(query);
   const hintedCategories = inferCategoriesFromQuery(query);
-  const queryTokens = expandTokens(rawTokens);
+  const signals = analyzeQuery(query);
+  // Hand-written synonyms stay a *weak* signal: they are added as plain words,
+  // never as anchors or phrases. The embedding carries the real meaning.
+  const expanded = new Set(signals.tokens);
+  for (const token of signals.tokens) {
+    for (const synonym of QUERY_SYNONYMS[token] ?? []) expanded.add(synonym);
+  }
+  signals.tokens = [...expanded];
 
-  // ---- Tier 1: keyword ------------------------------------------------
-  const keywordHits = memories
-    .map((m) => ({ ...m, score: scoreMemory(m, queryTokens, hintedCategories), source: "keyword" as const }))
-    .filter((m) => m.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+  const docs: RankDoc[] = memories.map((m) => ({
+    id: m.id,
+    content: m.content,
+    context: m.context,
+    category: m.category,
+    importance: m.importance,
+  }));
+  const df = buildDf(docs);
 
-  const results: RetrievedMemory[] = [...keywordHits];
+  // ---- Keyword evidence ------------------------------------------------
+  const keywordHits: Hit[] = [];
+  const keywordTier = new Map<string, number>();
+  for (const [i, doc] of docs.entries()) {
+    const match = scoreMatch(doc, signals, df, docs.length, hintedCategories);
+    if (!match.qualified) continue;
+    const strong = match.bigramHits > 0 || match.anchorHits > 0;
+    keywordHits.push({ memory: memories[i], score: match.score, source: "keyword" });
+    keywordTier.set(doc.id, strong ? 0 : 1);
+  }
+  const maxKeyword = Math.max(1e-6, ...keywordHits.map((h) => h.score));
+  for (const hit of keywordHits) hit.score /= maxKeyword; // comparable with cosine
+  keywordHits.sort((a, b) => b.score - a.score);
 
-  // ---- Tier 2: semantic ----------------------------------------------
-  const semanticSlots = limit - results.length;
-  if (semanticSlots > 0 && settings.semanticSearch !== false) {
+  // ---- Semantic evidence ----------------------------------------------
+  const semanticHits: Hit[] = [];
+  if (settings.semanticSearch !== false && !nonEnglish) {
     try {
-      const vectors = await getVectorsByProfile(profileId);
+      const vectors = (await withTimeout(getVectorsByProfile(profileId), 3000)) ?? [];
       if (vectors.length > 0) {
         const queryVector = await embedQuery(query);
         if (queryVector) {
-          const chosen = new Set(results.map((r) => r.id));
-          const semanticHits = vectors
-            .filter((v) => !chosen.has(v.memoryId))
-            .map((v) => ({ memoryId: v.memoryId, similarity: cosine(queryVector, v.vector) }))
-            .filter((x) => x.similarity >= SEMANTIC_THRESHOLD)
-            .sort((a, b) => b.similarity - a.similarity)
-            .slice(0, limit - results.length);
-
-          for (const hit of semanticHits) {
-            const memory = memories.find((m) => m.id === hit.memoryId);
-            if (memory && !results.some((r) => r.id === memory.id)) {
-              results.push({ ...memory, score: hit.similarity, source: "semantic" });
-            }
+          for (const vector of vectors) {
+            const similarity = cosine(queryVector, vector.vector);
+            if (similarity < SEMANTIC_THRESHOLD) continue;
+            const memory = memories.find((m) => m.id === vector.memoryId);
+            if (!memory) continue;
+            if (similarity < SEMANTIC_STRONG
+              && isCompoundFalseFriend(signals.tokens, `${memory.content} ${memory.context ?? ""}`)) continue;
+            semanticHits.push({ memory, score: similarity, source: "semantic" });
           }
+          semanticHits.sort((a, b) => b.score - a.score);
         }
       }
     } catch {
@@ -186,17 +188,35 @@ export async function retrieveRelevantMemories(
     }
   }
 
-  // ---- Tier 3: general fill -------------------------------------------
-  if (results.length < limit && settings.allowGeneralFallback !== false) {
-    const chosenIds = new Set(results.map((r) => r.id));
+  // ---- Fusion: meaning, then strong words, then weaker evidence ---------
+  const strongSemantic = semanticHits.filter((h) => h.score >= SEMANTIC_STRONG);
+  const weakSemantic = semanticHits.filter((h) => h.score < SEMANTIC_STRONG);
+  const strongKeyword = keywordHits.filter((h) => keywordTier.get(h.memory.id) === 0);
+  const weakKeyword = keywordHits.filter((h) => keywordTier.get(h.memory.id) === 1);
+
+  const ordered: Hit[] = [
+    ...strongSemantic,
+    ...strongKeyword,
+    ...weakSemantic,
+    ...weakKeyword,
+  ];
+
+  const chosen = new Set<string>();
+  const results: RetrievedMemory[] = [];
+  for (const hit of ordered) {
+    if (results.length >= limit) break;
+    if (chosen.has(hit.memory.id)) continue;
+    chosen.add(hit.memory.id);
+    results.push({ ...hit.memory, score: hit.score, source: hit.source });
+  }
+
+  // ---- General fill ----------------------------------------------------
+  // Non-English queries cannot be scored by the English-only model, so fill
+  // from the profile's strongest facts and let the user decide in the card.
+  if (results.length < limit && (settings.allowGeneralFallback !== false || nonEnglish)) {
     const fillers = memories
-      .filter((m) => !chosenIds.has(m.id))
-      .sort((a, b) => {
-        const rank = categoryRank(a.category) - categoryRank(b.category);
-        if (rank !== 0) return rank;
-        if (b.importance !== a.importance) return b.importance - a.importance;
-        return b.createdAt.localeCompare(a.createdAt);
-      })
+      .filter((m) => !chosen.has(m.id))
+      .sort(priority)
       .slice(0, limit - results.length)
       .map((m) => ({ ...m, score: 0, source: "general" as const }));
     results.push(...fillers);

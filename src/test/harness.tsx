@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 import { App as OptionsApp } from "../options/App";
 import { App as PopupApp } from "../popup/App";
 import "../ui/tokens.css";
+import "../ui/fonts.css";
 import "../options/styles.css";
 import "../popup/styles.css";
 

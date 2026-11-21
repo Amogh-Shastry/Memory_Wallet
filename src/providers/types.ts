@@ -19,4 +19,8 @@ export interface AIProviderAdapter {
   submitComposer(): boolean;
   /** Is this event target the site's send button? */
   isSendButton(target: EventTarget | null): boolean;
+  /** Latest assistant reply text, or null (used by one-click import). */
+  detectAssistantReply(): string | null;
+  /** True while the assistant is still streaming a reply. */
+  isGenerating(): boolean;
 }

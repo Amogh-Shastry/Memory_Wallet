@@ -1,5 +1,6 @@
 import type { AIProviderAdapter } from "../providers/types";
-import { showToast } from "./ui/toast";
+import { showToast, showShareReceipt } from "./ui/toast";
+import { grantLabel } from "../shared/consent";
 import {
   injectContextIntoConversation,
   submitQuestion,
@@ -11,8 +12,9 @@ import {
   type ShowMemoryRequestPayload,
 } from "../shared/messages";
 
-type Outcome = "auto-approved" | "needs-approval" | "denied" | "no-profile" | "busy" | "error";
+type Outcome = "auto-approved" | "needs-approval" | "denied" | "no-profile" | "no-memories" | "busy" | "error";
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const WATCHDOG_MS = 20_000; // background roundtrip safety net (intercepted mode)
 const POST_DECISION_GRACE_MS = 10_000;
 
@@ -20,6 +22,8 @@ interface FlowState {
   query: string;
   /** True when the user's unsent message is being held by us. */
   paused: boolean;
+  /** Set when a card is shown, so an abandoned card can be cancelled later. */
+  requestId?: string;
 }
 
 /**
@@ -45,6 +49,11 @@ export class PendingFlow {
     return this.state !== null || this.modal.isOpen();
   }
 
+  /** Used on pagehide so an abandoned card releases its tab slot. */
+  get pendingRequestId(): string | null {
+    return this.state?.requestId ?? null;
+  }
+
   async begin(query: string, paused: boolean): Promise<void> {
     if (this.isActive()) return;
     this.state = { query, paused };
@@ -52,14 +61,26 @@ export class PendingFlow {
 
     let outcome: Outcome | null = null;
     try {
-      const res = (await chrome.runtime.sendMessage({
-        type: MSG.QUERY_DETECTED,
-        payload: { appId: this.provider.id, query, url: location.href },
-      })) as { outcome?: Outcome } | undefined;
+      // An idle MV3 worker can miss the first wake-up ("Receiving end does not
+      // exist"). Retry briefly before giving up — the user's send is held.
+      let res: { outcome?: Outcome } | undefined;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          res = (await chrome.runtime.sendMessage({
+            type: MSG.QUERY_DETECTED,
+            payload: { appId: this.provider.id, query, url: location.href },
+          })) as { outcome?: Outcome } | undefined;
+          break;
+        } catch (err) {
+          if (attempt === 2) throw err;
+          await sleep(200 * (attempt + 1));
+        }
+      }
       outcome = res?.outcome ?? "error";
     } catch {
-      showToast("Memory Wallet was reloaded — refresh this tab to reactivate it", "warn");
-      this.state = null;
+      // Never strand a held message: release it unchanged.
+      showToast("Memory Wallet was unreachable — sending your question without context", "warn");
+      await this.finish(true);
       return;
     }
 
@@ -71,6 +92,14 @@ export class PendingFlow {
       case "denied":
         if (paused) {
           showToast("Memory sharing is denied for this profile — sending without it", "warn");
+          await this.finish(true);
+        } else {
+          this.state = null;
+        }
+        break;
+      case "no-memories":
+        if (paused) {
+          showToast("No relevant memories — sending your question unchanged", "info");
           await this.finish(true);
         } else {
           this.state = null;
@@ -89,6 +118,7 @@ export class PendingFlow {
 
   async handleShowRequest(payload: ShowMemoryRequestPayload): Promise<void> {
     this.disarmWatchdog();
+    if (this.state) this.state.requestId = payload.requestId;
     payload.paused = Boolean(this.state?.paused);
 
     const decision = await this.modal.show(payload);
@@ -135,10 +165,21 @@ export class PendingFlow {
     const result = await injectContextIntoConversation(this.provider, payload.contextText, queryForFill);
 
     if (result.filled && result.submitted) {
-      showToast(
-        `Shared ${payload.memoryCount} memories from "${payload.profileName}" with ${this.provider.name}`,
-        "success",
-      );
+      showShareReceipt({
+        appName: payload.appName,
+        profileName: payload.profileName,
+        memoryCount: payload.memoryCount,
+        durationLabel: payload.requireApproval
+          ? "Policy requires approval every time"
+          : grantLabel(payload.duration),
+        canRevoke: payload.standingGranted,
+        onRevoke: () => {
+          void chrome.runtime.sendMessage({
+            type: MSG.REVOKE_GRANT,
+            payload: { appId: this.provider.id, profileId: payload.profileId },
+          });
+        },
+      });
     } else if (result.filled) {
       showToast(
         `Context inserted — review and press Enter to send (${payload.memoryCount} memories)`,
@@ -185,8 +226,15 @@ export class PendingFlow {
   private armWatchdog(ms: number): void {
     this.disarmWatchdog();
     this.watchdog = window.setTimeout(() => {
-      if (!this.state?.paused) return;
-      console.info("[Memory Wallet] request timed out");
+      const state = this.state;
+      if (!state?.paused) return;
+      // Tell the worker the card is abandoned, or its pending slot would keep
+      // blocking this tab until the TTL expires.
+      if (state.requestId) {
+        void chrome.runtime
+          .sendMessage({ type: MSG.CANCEL_REQUEST, payload: { requestId: state.requestId } })
+          .catch(() => undefined);
+      }
       showToast("Memory Wallet timed out — sending your original question", "warn");
       void this.finish(true);
     }, ms);

@@ -3,8 +3,14 @@
    its own stylesheet. Content scripts mirror these values via
    src/ui/contentTokens.ts (shadow DOM can't see page-level custom properties). */
 
+/* Fonts are bundled locally in fonts.css — never imported from a CDN. */
+
 :root {
   color-scheme: dark;
+
+  /* ── font families (Option B: Linear aesthetic) ── */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 
   /* ── surfaces ── */
   --bg: #090a0f;
@@ -128,11 +134,28 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-sans);
   font-size: var(--text-md);
   line-height: var(--leading-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11", "tnum";
+  letter-spacing: -0.011em;
+}
+
+code,
+kbd,
+samp,
+pre,
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+.tab-count,
+.request-time,
+.stat-number,
+.balance-number {
+  font-variant-numeric: tabular-nums;
 }
 
 ::selection {

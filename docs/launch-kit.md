@@ -1,6 +1,6 @@
-# Memory Wallet — Launch Kit (v0.8)
+# Memory Wallet — Launch Kit (v1.0)
 
-> Audience: mainstream ChatGPT/Claude users. Tone: plain, no jargon. Trust anchor: open source + local-only.
+> Audience: mainstream ChatGPT/Claude users. Tone: plain, no jargon. Trust anchor: local-only + private by design.
 
 ---
 
@@ -15,7 +15,7 @@ Sub: ChatGPT remembers you. Shouldn't you decide what it remembers? Memory Walle
 Sub: Memory Wallet puts a permission gate between your memories and every AI you use. You choose the profile, you see exactly what will be shared, then you allow — or don't. 100% on-device.
 
 **C. One wallet for everything AI knows about you.**
-Sub: Work, personal, side projects — keep them separate. When ChatGPT or Claude wants context, Memory Wallet shows you the request, the reason, and the preview. One click to share. Open source, local-only.
+Sub: Work, personal, side projects — keep them separate. When ChatGPT or Claude wants context, Memory Wallet shows you the request, the reason, and the preview. One click to share. Private by design, local-only.
 
 ### Feature blocks (use real UI names/screenshots)
 
@@ -25,8 +25,8 @@ When you hit Enter, your message pauses and a Memory Request card appears — wh
 **2. Profiles are boundaries. Not folders.**
 Startup ≠ Work ≠ Personal. Each profile is a separate context. Switch the active profile in the popup — the on-page pill updates live. The card even lets you tap a different profile before you allow.
 
-**3. Nothing leaves this device. Ever. And you can verify it.**
-No backend, no account, no analytics. Memories live in your browser's local storage. The code is open source — [github.com/Souhadra/Memory_Wallet](https://github.com/Souhadra/Memory_Wallet) — so you don't have to take our word for it.
+**3. Nothing leaves this device. Ever. And you can check.**
+No backend, no account, no analytics. Memories live in your browser's local storage. The extension's bundled JavaScript runs on your device — open `chrome://extensions` → Inspect views, or watch the Network tab while you use it. Every request is also logged in the dashboard with the exact memories that were shared.
 
 ### How it works (3 steps, matches the wizard)
 
@@ -36,14 +36,14 @@ No backend, no account, no analytics. Memories live in your browser's local stor
 
 ### Social proof / trust strip (pre-launch placeholder)
 
-> Local-only prototype · Works on ChatGPT & Claude · Open source · No data leaves your device
+> Local-only by design · Works on ChatGPT & Claude · No account · No data leaves your device
 
 After you have 5–10 beta users, replace with a single quote: *"Finally I can let ChatGPT help with LIBRO without pasting my whole background every time."*
 
 ### FAQ
 
 **Is my data safe?**
-Yes. Everything is stored in `chrome.storage.local` on your device. There is no server. If you uninstall the extension, the data is gone unless you exported it. The repo is public so anyone can audit what the extension does.
+Yes. Everything is stored in `chrome.storage.local` on your device. There is no server. If you uninstall the extension, the data is gone unless you exported it. Every request is logged in the dashboard, so you can audit exactly what was shared and when.
 
 **Which AI apps work?**
 ChatGPT (`chatgpt.com`) and Claude (`claude.ai`) today. More providers are added via one small adapter file each — Gemini is next on the list.
@@ -63,37 +63,47 @@ Yes. Dashboard → Memories → Import ChatGPT memory JSON. Paste the list from 
 **Body:** Join the waitlist — we'll invite a small beta group as the storage layer stabilizes. No spam, one email when your invite is ready.
 **Fields:** Email + one optional question (see Validation kit below)
 **Button:** Join waitlist
-**Microcopy below button:** Open source · Local-only · Unsubscribe anytime.
+**Microcopy below button:** Local-only · Private by design · Unsubscribe anytime.
 
 ### Meta (SEO / social)
 
-- **Title:** Memory Wallet — Your AI memory. Your rules. (Local-first, open source)
+- **Title:** Memory Wallet — Your AI memory. Your rules. (Local-first, private by design)
 - **Description:** Own the memory you share with AI. Memory Wallet is a local-first browser extension where ChatGPT and Claude must ask before they access your memories. You preview, you approve, nothing leaves your device.
 - **OG image suggestion:** Screenshot of the permission card on top of a blurred ChatGPT chat, with the pill visible bottom-right. No mockups.
 
 ---
 
-## 2. Demo script — 45–60s GIF / video
+## 2. Demo video — 26s, 1920×1080, silent
 
-**Goal:** Prove the core loop in one take. No voiceover needed — captions do the work.
+**Goal:** Prove the core loop in one take. No voiceover — captions do the work, and the user adds music in post.
 
-**Setup (before recording):**
-- Chrome 110% zoom, bookmarks bar hidden, one clean ChatGPT tab, new chat.
-- Wallet seeded: Startup profile active with 3–4 memories about "LIBRO — library chatbot, Vectorless RAG" (use sample data or your real import). Popup shows Startup active.
-- Screen recorder at 1080p, cursor at normal speed. No other extensions visible.
+**Delivered assets** (`dist/demo/`):
+- `memory-wallet-demo.mp4` — 1920×1080, 25 fps, H.264, 26.28s, no audio stream
+- `captions.srt` — sidecar captions matching the burned-in overlays
+- `poster.png` — 1920×1080 poster from the real card still
+- `memory-wallet-demo.gif` — short loop for the landing page
 
-| Shot | What to do | On-screen caption | Duration |
-|------|------------|-------------------|----------|
-| 1 | Show popup: Startup (🚀) active, 7 memories. Close it. | `Your AI memory. Your rules.` | 4s |
-| 2 | In ChatGPT composer, type: *"I'm working on my library chatbot LIBRO — what architecture should I use?"* — press Enter. | `Ask AI normally.` | 5s |
-| 3 | Message visibly pauses; Memory Request card slides in top-right. Pause 1s so viewer reads: profile, categories, reason, READ ONLY, preview of 2–3 memories. | `Your message pauses. AI asks for permission.` | 7s |
-| 4 | Hover the preview, then click **Once → Allow**. Composer fills with `[Memory Wallet Context]` + question and sends as one message. | `You see exactly what will be shared. Then you allow.` | 8s |
-| 5 | ChatGPT answers referencing your memories (e.g., "Vectorless RAG on Render"). Highlight one phrase. | `The answer uses your memory.` | 6s |
-| 6 | Quick cut: open popup → switch to Work (💼) → pill bottom-right animates from `🚀 Startup` to `💼 Work`. | `Work ≠ Personal. You choose.` | 6s |
+**Setup:**
+- 1920×1080 recording viewport, bookmarks bar hidden, one clean ChatGPT tab, new chat.
+- Personal profile active with the real `import-files/personal.json` memories. The card picks 5: name, career status, education, academic topics, leadership/extracurriculars.
+- Record against the controlled ChatGPT stage (`scripts/recordLiveDemo.mjs`) so the take is deterministic. The extension and every wallet surface are real; do not screenshot during the video take.
+- No baked-in captions in the recording — overlays are added in post by `scripts/editDemo.mjs`.
 
-**End card (2s):** `Memory Wallet — Local-only · Open source` + waitlist URL.
+| Shot | What happens | On-screen caption | Duration |
+|------|--------------|-------------------|----------|
+| 1 | Title card. | `Memory Wallet` / `Your AI memory. Your rules.` | 3.0s |
+| 2 | Type the Personal networking question and press Enter. | `Ask ChatGPT a question, just like normal.` | 4.25s |
+| 3 | The send pauses; the permission card shows 5 Personal memories. Hold so the viewer can read the preview. | `The send pauses. Five Personal memories appear — nothing is sent yet.` | 4.15s |
+| 4 | Click **Share & Send**. The answer streams in, mentioning Souhadra and MS Ramaiah Institute of Technology. | `Approve once. Only those five memories are shared.` → `The reply uses your context — no copy-paste, no re-explaining.` | 6.67s |
+| 5 | Cut to Dashboard → Requests: the request is logged with the exact memories, decision, and timestamp. | `Every request is logged on your device, with the exact memories shared.` | 3.4s |
+| 6 | End card. No CTA. | `Memory Wallet` / `Your AI memory. Your rules.` / `Local-only. Nothing leaves your device.` | 3.4s |
 
-**Export:** GIF ≤15MB for landing hero (loop shots 2–5), full video for X/Reddit.
+**Editing notes:**
+- Intro and end cards are rendered at 1920×1080 with Playwright, not screen-recorded.
+- Captions sit bottom-left at 72px / 150px, clear of the permission card, the “Shared 5 memories” toast, the account row, and the composer.
+- Hold the settled answer for 1.4s before cutting to the audit view.
+- Export H.264 with **no audio track** — the user adds music separately.
+- Music suggestions: DensoMusic “Minimal Technology Corporate” or Bensound “Hopeful Ambient.” Keep it instrumental and under the visuals.
 
 ---
 
@@ -108,9 +118,9 @@ I was tired of ChatGPT remembering things about me with no way to control what i
 
 So I built Memory Wallet — a local-first Chrome extension. When you press Enter on ChatGPT or Claude, your message pauses and a permission card appears: who is asking, which profile (Work / Personal / Startup), what info, why, and a preview of the memories that will be shared. You hit Allow and it sends context + question together. Deny sends your question unchanged.
 
-Everything stays on your device — no backend, no account. Code is open source: github.com/Souhadra/Memory_Wallet
+Everything stays on your device — no backend, no account, no analytics. Every request is logged locally, so you can audit exactly what was shared.
 
-It's a prototype (v0.8) — works on ChatGPT and Claude, ~30MB local model for semantic matching, one-time download then offline.
+It's v1.0 — works on ChatGPT and Claude, ~30MB local model for semantic matching, one-time download then offline.
 
 Looking to validate if people actually want this. If you do, join the waitlist [link] — inviting a small beta as the storage layer settles. Happy to answer anything, and brutal feedback welcome.
 
@@ -131,9 +141,9 @@ Deny = your question sent unchanged.
 
 **3/4** Profiles are boundaries. Startup ≠ Work ≠ Personal. Switch in the popup, the on-page pill updates live.
 
-100% local. No backend. Open source: github.com/Souhadra/Memory_Wallet
+100% local. No backend. Every request is logged on your device, with the exact memories that were shared.
 
-**4/4** It's a prototype (v0.8) on ChatGPT + Claude. Trying to validate demand before I ship wider.
+**4/4** It's v1.0 on ChatGPT + Claude. Trying to validate demand before I ship wider.
 
 If you want in → [waitlist link]
 
@@ -172,11 +182,11 @@ Tally shows referrer; or add a hidden field that captures `utm_source`.
 ### What to do with the list
 
 - One confirmation email: "You're on the list — small beta invites as storage stabilizes. Reply with the hardest thing about AI memory for you?"
-- No drip sequence yet. Wait until you have a v0.9 beta worth inviting to.
+- No drip sequence yet. Wait until you have a beta build worth inviting to.
 
 ---
 
 ## Notes for you
 
-- Record the demo *after* your new-user test pass — if the wizard or card has rough edges, patch to v0.8.x first so the video shows a clean flow.
-- Landing build is yours per your call — this file is copy only. Drop it into whatever stack you use (Framer / Webflow / plain HTML on GitHub Pages all work).
+- Record the demo *after* your new-user test pass — if the wizard or card has rough edges, patch first so the video shows a clean flow.
+- Landing build is yours per your call — this file is copy only. Drop it into whatever stack you use (Framer / Webflow / plain HTML on any static host all work).

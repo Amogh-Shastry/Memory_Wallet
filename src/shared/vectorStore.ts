@@ -37,6 +37,8 @@ function openDb(): Promise<IDBDatabase> {
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+    // A stale connection from an abruptly closed tab can block forever.
+    req.onblocked = () => reject(new Error("vector store blocked"));
   });
 }
 
@@ -50,11 +52,15 @@ function txDone(tx: IDBTransaction): Promise<void> {
 
 export async function getAllVectors(): Promise<VectorRecord[]> {
   const db = await openDb();
-  return new Promise((resolve, reject) => {
-    const req = db.transaction(STORE, "readonly").objectStore(STORE).getAll();
-    req.onsuccess = () => resolve(req.result as VectorRecord[]);
-    req.onerror = () => reject(req.error);
-  });
+  try {
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction(STORE, "readonly").objectStore(STORE).getAll();
+      req.onsuccess = () => resolve(req.result as VectorRecord[]);
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 export async function getVectorsByProfile(profileId: string): Promise<VectorRecord[]> {

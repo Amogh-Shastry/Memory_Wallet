@@ -7,6 +7,7 @@ import {
 import {
   ensureSeeded,
   getAIApplications,
+  getMemories,
   getProfiles,
   getRequests,
   getSettings,
@@ -14,6 +15,7 @@ import {
   saveRequests,
 } from "../shared/storage";
 import { getAccessLevel, setAccessLevel } from "../shared/permissions";
+import { canAutoApprove } from "../shared/consent";
 import { inferCategoriesFromQuery, retrieveRelevantMemories } from "../shared/retrieval";
 import {
   MSG,
@@ -23,6 +25,8 @@ import {
   type QueryDetectedPayload,
   type RequestDecisionPayload,
   type ShowMemoryRequestPayload,
+  type RevokeGrantPayload,
+  type SaveImportedMemoriesPayload,
 } from "../shared/messages";
 import { buildContextBlock } from "../shared/contextBlock";
 import {
@@ -32,21 +36,104 @@ import {
   ensureOffscreen,
 } from "./embeddingService";
 
-/** Grants that last for the browser session and never touch stored permissions. */
-const sessionGrants = new Set<string>();
-/** Pending request id per tab (one at a time keeps the UX honest). */
-const pendingByTab = new Map<number, string>();
+/** Grants that last for the browser session and never touch stored permissions.
+ *  Backed by chrome.storage.session: survives MV3 service-worker restarts,
+ *  cleared automatically when the browser closes — matching the "Session" promise. */
+const SESSION_GRANTS_KEY = "mw_session_grants";
+/** Pending request id per tab (one at a time keeps the UX honest).
+ *  Must live in storage.session, not a module-level Map: MV3 evicts the worker
+ *  after ~30s idle, and a lost entry used to leave a tab permanently "busy"
+ *  with no card and no way to recover. Entries also expire, so a tab that is
+ *  closed or navigated away while the card is open self-heals. */
+const PENDING_KEY = "mw_pending_requests";
+const PENDING_TTL_MS = 30 * 1000;
+
+interface PendingEntry {
+  requestId: string;
+  at: number;
+}
+type PendingMap = Record<string, PendingEntry>;
+
+async function readPending(): Promise<PendingMap> {
+  try {
+    const res = await chrome.storage.session.get(PENDING_KEY);
+    const raw = (res[PENDING_KEY] as PendingMap | undefined) ?? {};
+    const cutoff = Date.now() - PENDING_TTL_MS;
+    const live: PendingMap = {};
+    for (const [tabId, entry] of Object.entries(raw)) {
+      if (entry && entry.at >= cutoff) live[tabId] = entry;
+    }
+    return live;
+  } catch {
+    return {};
+  }
+}
+
+async function setPending(tabId: number, requestId: string): Promise<void> {
+  try {
+    const map = await readPending();
+    map[String(tabId)] = { requestId, at: Date.now() };
+    await chrome.storage.session.set({ [PENDING_KEY]: map });
+  } catch {
+    // Session storage unavailable — the watchdog in the content script still
+    // unblocks the tab, so failing here degrades UX but cannot wedge it.
+  }
+}
+
+async function clearPending(tabId: number): Promise<void> {
+  try {
+    const map = await readPending();
+    if (!(String(tabId) in map)) return;
+    delete map[String(tabId)];
+    await chrome.storage.session.set({ [PENDING_KEY]: map });
+  } catch {
+    // ignore
+  }
+}
+
+async function hasPending(tabId: number): Promise<boolean> {
+  return String(tabId) in (await readPending());
+}
 
 function grantKey(appId: string, profileId: string) {
   return `${appId}:${profileId}`;
 }
 
-export function hasSessionGrant(appId: string, profileId: string): boolean {
-  return sessionGrants.has(grantKey(appId, profileId));
+async function readSessionGrants(): Promise<Set<string>> {
+  try {
+    const res = await chrome.storage.session.get(SESSION_GRANTS_KEY);
+    return new Set((res[SESSION_GRANTS_KEY] as string[] | undefined) ?? []);
+  } catch {
+    return new Set();
+  }
 }
 
-export function addSessionGrant(appId: string, profileId: string): void {
-  sessionGrants.add(grantKey(appId, profileId));
+export async function hasSessionGrant(appId: string, profileId: string): Promise<boolean> {
+  return (await readSessionGrants()).has(grantKey(appId, profileId));
+}
+
+export async function addSessionGrant(appId: string, profileId: string): Promise<void> {
+  const grants = await readSessionGrants();
+  grants.add(grantKey(appId, profileId));
+  await chrome.storage.session.set({ [SESSION_GRANTS_KEY]: [...grants] });
+}
+
+async function removeSessionGrant(appId: string, profileId: string): Promise<void> {
+  const grants = await readSessionGrants();
+  if (!grants.delete(grantKey(appId, profileId))) return;
+  await chrome.storage.session.set({ [SESSION_GRANTS_KEY]: [...grants] });
+}
+
+/**
+ * "Stop auto-sharing" from the receipt. Drops both the persisted "allow" and
+ * the session-only grant; an explicit "deny" is left alone (deny is a stronger
+ * statement than "ask" and must not be weakened by a receipt click).
+ */
+export async function revokeStandingGrant(appId: string, profileId: string): Promise<void> {
+  if ((await getAccessLevel(appId, profileId)) === "allow") {
+    await setAccessLevel(appId, profileId, "ask");
+  }
+  await removeSessionGrant(appId, profileId);
 }
 
 export function inferRequestedCategories(query: string): MemoryCategory[] {
@@ -77,7 +164,7 @@ async function sendToTab(tabId: number, message: unknown): Promise<void> {
 }
 
 interface HandleResult {
-  outcome: "auto-approved" | "needs-approval" | "denied" | "no-profile" | "busy";
+  outcome: "auto-approved" | "needs-approval" | "denied" | "no-profile" | "no-memories" | "busy";
 }
 
 export async function handleQueryDetected(
@@ -88,7 +175,7 @@ export async function handleQueryDetected(
     // Keep the embedding index in sync (no-op when nothing changed).
     kickOffIndexing();
 
-    if (pendingByTab.has(tabId)) return { outcome: "busy" };
+    if (await hasPending(tabId)) return { outcome: "busy" };
 
     const settings = await getSettings();
     const activeProfileId = settings.activeProfileId;
@@ -119,8 +206,10 @@ export async function handleQueryDetected(
       return { outcome: "denied" };
     }
 
-    // ALLOW permission or a standing session grant -> serve silently.
-    if (access === "allow" || hasSessionGrant(payload.appId, activeProfileId)) {
+    // A standing grant from the first Allow -> serve silently from now on.
+    // An explicit "always ask" setting (or enterprise policy) wins.
+    const hasGrant = await hasSessionGrant(payload.appId, activeProfileId);
+    if (canAutoApprove({ access, hasStandingGrant: hasGrant, requireApproval: settings.requireApproval === true })) {
       await approveAndInject(
         tabId,
         { ...baseRequest, status: "approved", resolvedAt: nowISO() },
@@ -133,20 +222,27 @@ export async function handleQueryDetected(
     const profiles = await getProfiles();
     const profile = profiles.find((p) => p.id === activeProfileId);
 
-    pendingByTab.set(tabId, baseRequest.id);
+    await setPending(tabId, baseRequest.id);
     await logRequest(baseRequest);
-
     // Pre-compute previews for EVERY profile so the card can switch profiles
     // instantly. Retrieval is local keyword scoring + general-context fill;
-    // nothing is shared until the user allows.
+    // nothing is shared until the user allows. Preview the same number that
+    // approval will actually share so the card's count is never optimistic.
+    const previewCount = Math.max(1, Math.min(settings.maxMemoriesPerRequest, 6));
     const previews: Record<string, PreviewMemory[]> = {};
     for (const p of profiles) {
-      const mems = await retrieveRelevantMemories(payload.query, p.id, 3);
+      const mems = await retrieveRelevantMemories(payload.query, p.id, previewCount);
       previews[p.id] = mems.map((m) => ({
         content: m.content,
         category: m.category,
         source: m.source,
+        context: m.context,
       }));
+    }
+    if (!Object.values(previews).some((items) => items.length > 0)) {
+      // Asking permission to share nothing trains users to click Allow blindly.
+      await clearPending(tabId);
+      return { outcome: "no-memories" };
     }
 
     const showPayload: ShowMemoryRequestPayload = {
@@ -163,10 +259,9 @@ export async function handleQueryDetected(
       previews,
     };
     await sendToTab(tabId, { type: MSG.SHOW_MEMORY_REQUEST, payload: showPayload });
-    return { outcome: "needs-approval" };
-  } catch (e) {
+    return { outcome: "needs-approval" };  } catch (e) {
     console.error("[Memory Wallet] handleQueryDetected failed", e);
-    pendingByTab.delete(tabId);
+    await clearPending(tabId);
     return { outcome: "no-profile" };
   }
 }
@@ -180,6 +275,16 @@ async function approveAndInject(
   request: MemoryRequest,
   duration: "once" | "session" | "always",
 ): Promise<void> {
+  const apps = await getAIApplications();
+  const appName = apps.find((a) => a.id === request.aiApplicationId)?.name ?? request.aiApplicationId;
+  const receiptMeta = {
+    profileId: request.profileId,
+    appName,
+    duration,
+    standingGranted: duration === "always" || duration === "session",
+    requireApproval: (await getSettings()).requireApproval === true,
+  };
+
   await updateLoggedRequest(request.id, {
     status: "approved",
     duration,
@@ -205,6 +310,7 @@ async function approveAndInject(
         query: request.query,
         memoryCount: 0,
         profileName: "",
+        ...receiptMeta,
       } satisfies InjectContextPayload,
     });
     return;
@@ -223,6 +329,7 @@ async function approveAndInject(
       query: request.query,
       memoryCount: memories.length,
       profileName,
+      ...receiptMeta,
     } satisfies InjectContextPayload,
   });
 }
@@ -233,7 +340,7 @@ export async function handleRequestDecision(
 ): Promise<void> {
   const requests = await getRequests();
   const request = requests.find((r) => r.id === payload.requestId);
-  pendingByTab.delete(tabId);
+  await clearPending(tabId);
   if (!request || !request.tabId) return;
 
   if (payload.decision === "deny") {
@@ -256,7 +363,7 @@ export async function handleRequestDecision(
   if (payload.duration === "always") {
     await setAccessLevel(request.aiApplicationId, effectiveProfileId, "allow");
   } else if (payload.duration === "session") {
-    addSessionGrant(request.aiApplicationId, effectiveProfileId);
+    await addSessionGrant(request.aiApplicationId, effectiveProfileId);
   }
 
   await approveAndInject(
@@ -299,6 +406,24 @@ export async function initBackground(): Promise<void> {
   // Warm up the semantic index in the background (downloads the model on
   // first ever run; no-op afterwards). Never blocks anything.
   kickOffIndexing();
+  // An already-built index never calls the model, so on a fresh browser it is
+  // still unloaded. Warm it now: the first permission card should not have to
+  // wait for a 23 MB wasm compile before it can rank by meaning.
+  void embedTexts(["warmup"]).catch(() => undefined);
+
+  // A card is only visible in the tab that asked for it. Navigating away or
+  // closing that tab abandons the card, so release the pending slot at once —
+  // otherwise the next question is silently sent without memory for up to the
+  // TTL, and looks like the wallet randomly stopped working.
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void clearPending(tabId);
+  });
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    // changeInfo.url is withheld for hosts we lack permissions for, so a
+    // navigation away to an unrelated site would otherwise be invisible.
+    // status:"loading" is always delivered and still means the card is gone.
+    if (changeInfo.status === "loading" || changeInfo.url) void clearPending(tabId);
+  });
 
   // Offscreen -> background: route embedding results to waiting callers.
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -317,9 +442,6 @@ export async function initBackground(): Promise<void> {
         }
         case MSG.QUERY_DETECTED: {
           const payload = message.payload as QueryDetectedPayload;
-          console.info(
-            `[Memory Wallet] query from ${payload.appId} (${payload.query.length} chars)`,
-          );
           const result = await handleQueryDetected(sender.tab?.id ?? -1, payload);
           sendResponse(result);
           break;
@@ -327,6 +449,79 @@ export async function initBackground(): Promise<void> {
         case MSG.REQUEST_DECISION: {
           await handleRequestDecision(sender.tab?.id ?? -1, message.payload);
           sendResponse({ ok: true });
+          break;
+        }
+        case MSG.CANCEL_REQUEST: {
+          // Watchdog fired or the card was abandoned: release the tab so the
+          // next question gets its own card instead of a silent passthrough.
+          const tabId = sender.tab?.id ?? -1;
+          await clearPending(tabId);
+          const requestId = (message.payload as { requestId?: string } | undefined)?.requestId;
+          if (requestId) {
+            const requests = await getRequests();
+            if (requests.some((r) => r.id === requestId && r.status === "pending")) {
+              await updateLoggedRequest(requestId, { status: "cancelled", resolvedAt: nowISO() });
+            }
+          }
+          sendResponse({ ok: true });
+          break;
+        }
+        case MSG.REVOKE_GRANT: {
+          const { appId, profileId } = message.payload as RevokeGrantPayload;
+          await revokeStandingGrant(appId, profileId);
+          sendResponse({ ok: true });
+          break;
+        }
+        case MSG.SAVE_IMPORTED_MEMORIES: {
+          const { proposals } = message.payload as SaveImportedMemoriesPayload;
+          const settings = await getSettings();
+          const profileId = settings.activeProfileId ?? (await getProfiles())[0]?.id;
+          let saved = 0;
+          if (profileId && Array.isArray(proposals)) {
+            const { addMemory, updateMemory } = await import("../shared/actions");
+            for (const p of proposals) {
+              if (!p.content?.trim()) continue;
+
+              if (p.kind === "update" && p.previous) {
+                const choice = p.resolution ?? "new";
+                if (choice === "old") continue;
+                if (choice === "new") {
+                  const previous = (await getMemories()).find((m) => m.id === p.previous!.id);
+                  if (!previous) continue;
+                  await updateMemory(previous.id, {
+                    content: p.content.trim(),
+                    category: p.category,
+                    importance: p.importance,
+                    context: p.context ?? previous.context,
+                    previousValues: [...(previous.previousValues ?? []), previous.content],
+                  });
+                } else {
+                  await addMemory({
+                    profileId,
+                    content: p.content.trim(),
+                    category: p.category,
+                    importance: p.importance,
+                    origin: "ai-import",
+                    context: p.context,
+                  });
+                }
+                saved++;
+                continue;
+              }
+
+              await addMemory({
+                profileId,
+                content: p.content.trim(),
+                category: p.category,
+                importance: p.importance,
+                origin: "ai-import",
+                context: p.context,
+              });
+              saved++;
+            }
+            kickOffIndexing(true);
+          }
+          sendResponse({ ok: saved > 0, saved });
           break;
         }
         case EMBED_MSG.EMBED_QUERY: {

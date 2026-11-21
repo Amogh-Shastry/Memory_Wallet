@@ -1,0 +1,64 @@
+# Release gate for the extension itself.
+# Typechecks, builds the production bundle, verifies the vendored model, and
+# proves the package cannot reach a remote resource. Any failure blocks a merge
+# because each of these has a way of regressing silently.
+
+name: Extension CI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # The model is gitignored; the build intentionally refuses to run without it.
+      - run: npm run fetch:model
+      - run: npm run check:model
+
+      - run: npm run typecheck
+
+      # The extractor is the highest-risk logic in the product and is pure,
+      # so it gets a fast, dependency-free test before the build gate.
+      - run: npm test
+
+      - run: npm run build -- --production
+
+      # Hard gate: fails if dist/ references a font/script CDN, a remote url(),
+      # or is missing the bundled embedding model.
+      - run: npm run check:no-remote
+
+      # Fail the run if the production bundle grows past a sane ceiling.
+      # 23 MB model + 12 MB onnxruntime wasm + ~1 MB app code.
+      - name: Check package size
+        run: |
+          total=$(du -sm dist | cut -f1)
+          echo "dist is ${total} MB"
+          if [ "$total" -gt 45 ]; then
+            echo "::error::dist exceeded 45 MB — check for stale or accidental files"
+            exit 1
+          fi

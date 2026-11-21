@@ -2,12 +2,15 @@ import type { AIProviderAdapter } from "./types";
 
 // Ordered fallbacks — ChatGPT's markup changes; try newest known first.
 const USER_MESSAGE_SELECTORS = [
+  // Current ChatGPT DOM (2026) uses data-* attributes, not author roles.
+  '[data-user-message-bubble="true"]',
   'div[data-message-author-role="user"]',
   'article[data-testid^="conversation-turn"] div[data-message-author-role="user"]',
   '[data-testid="user-message"]',
 ];
 const COMPOSER_SELECTORS = [
   "#prompt-textarea",
+  "#mobile-composer-prompt",
   "main div[role='textbox']",
   "form div[contenteditable='true']",
   "div[contenteditable='true'][id]",
@@ -19,14 +22,38 @@ const SEND_BUTTON_SELECTORS = [
   'form button[type="submit"]',
   'button[aria-label*="Send" i]',
 ];
+const ASSISTANT_SELECTORS = [
+  // The assistant reply now lives in [data-dil-response], and no longer has
+  // data-message-author-role. This selector drives one-click import's
+  // "wait until the answer finished streaming" detector.
+  "[data-dil-response]",
+  'div[data-message-author-role="assistant"]',
+  '[data-testid^="conversation-turn"] div[data-message-author-role="assistant"]',
+];
+const STOP_SELECTORS = [
+  'button[data-testid="stop-button"]',
+  'button[aria-label*="Stop" i]',
+];
 
 function firstMatch<T extends Element>(selectors: string[]): T | null {
+  let fallback: T | null = null;
   for (const sel of selectors) {
-    const el = document.querySelector<T>(sel);
-    if (el) return el;
+    for (const el of document.querySelectorAll<T>(sel)) {
+      if (!fallback) fallback = el;
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0 && getComputedStyle(el).visibility !== "hidden") {
+        return el;
+      }
+    }
   }
-  return null;
+  return fallback;
 }
+
+const squash = (s: string): string => s.replace(/\s+/g, "");
+
+/** innerText keeps bullet line breaks; textContent flattens them. */
+const textOf = (el: Element | null): string =>
+  el instanceof HTMLElement ? el.innerText || el.textContent || "" : (el?.textContent ?? "");
 
 function setText(el: HTMLElement, text: string): boolean {
   el.focus();
@@ -41,7 +68,7 @@ function setText(el: HTMLElement, text: string): boolean {
   // ProseMirror-style contenteditable
   document.execCommand("selectAll", false);
   document.execCommand("insertText", false, text);
-  return (el.textContent ?? "").includes(text.slice(0, Math.min(40, text.length)));
+  return squash(el.textContent ?? "").includes(squash(text.slice(0, Math.min(40, text.length))));
 }
 
 export const chatgptAdapter: AIProviderAdapter = {
@@ -58,7 +85,10 @@ export const chatgptAdapter: AIProviderAdapter = {
       const nodes = document.querySelectorAll(sel);
       if (nodes.length > 0) last = nodes[nodes.length - 1];
     }
-    return (last?.textContent ?? "").trim() || null;
+    // Some surfaces render only a truncated question but keep the raw payload
+    // (including the wallet marker) on the turn element.
+    const raw = last?.getAttribute("data-mw-raw") ?? textOf(last);
+    return raw.trim() || null;
   },
 
   getComposer(): HTMLElement | null {
@@ -104,5 +134,23 @@ export const chatgptAdapter: AIProviderAdapter = {
       }
     }
     return false;
+  },
+
+  detectAssistantReply(): string | null {
+    let last: Element | null = null;
+    for (const sel of ASSISTANT_SELECTORS) {
+      const nodes = document.querySelectorAll(sel);
+      if (nodes.length > 0) last = nodes[nodes.length - 1];
+    }
+    return textOf(last).trim() || null;
+  },
+
+  isGenerating(): boolean {
+    return STOP_SELECTORS.some((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
   },
 };

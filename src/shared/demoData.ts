@@ -8,28 +8,15 @@ export const DEFAULT_AI_APPS: AIApplication[] = [
 
 export function createDefaultProfiles(): Profile[] {
   const t = new Date().toISOString();
+  // One profile, deliberately. Most people do not want to curate a filing
+  // cabinet of contexts — they want one memory the AI can read. Additional
+  // profiles remain available in Advanced for anyone who wants them.
   return [
     {
-      id: "profile_personal",
-      name: "Personal",
-      description: "Everyday personal context.",
-      icon: "🏠",
-      createdAt: t,
-      updatedAt: t,
-    },
-    {
-      id: "profile_work",
-      name: "Work",
-      description: "Professional context for your job.",
-      icon: "💼",
-      createdAt: t,
-      updatedAt: t,
-    },
-    {
-      id: "profile_startup",
-      name: "Startup",
-      description: "Context for your startup project.",
-      icon: "🚀",
+      id: "profile_me",
+      name: "Me",
+      description: "What the AI should know about you.",
+      icon: "🧠",
       createdAt: t,
       updatedAt: t,
     },

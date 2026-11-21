@@ -3,20 +3,15 @@ import { getSettings } from "../shared/storage";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** A contenteditable's textContent concatenates block elements with no
+ *  separators at all ("…Context]Profile: MeMatched memories:…"), while the
+ *  block we build has newlines. Compare with whitespace removed entirely or
+ *  the fill check fails on ChatGPT's current composer and nothing is sent. */
+const squash = (s: string): string => s.replace(/\s+/g, "");
+
 export interface InjectionResult {
   filled: boolean;
   submitted: boolean;
-}
-
-/** Console diagnostics without any message content (selector-drift debugging). */
-function logComposerDiagnostics(): void {
-  const diag = {
-    promptTextarea: !!document.querySelector("#prompt-textarea"),
-    roleTextbox: document.querySelectorAll('[role="textbox"]').length,
-    contenteditable: document.querySelectorAll("[contenteditable='true']").length,
-    textareas: document.querySelectorAll("textarea").length,
-  };
-  console.info("[Memory Wallet] composer diagnostics:", JSON.stringify(diag));
 }
 
 /**
@@ -29,15 +24,16 @@ export async function injectContextIntoConversation(
   originalQuery: string,
 ): Promise<InjectionResult> {
   const combined = `${contextText}\n\n${originalQuery}`;
+  const expected = squash(combined.slice(0, 80));
 
   let filled = false;
   for (let attempt = 0; attempt < 3 && !filled; attempt++) {
     filled = provider.setComposerText(combined);
+    if (filled) filled = squash(provider.readComposerText()).includes(expected);
     if (!filled) await sleep(250);
   }
 
   if (!filled) {
-    logComposerDiagnostics();
     try {
       await navigator.clipboard.writeText(combined);
     } catch {
@@ -51,10 +47,10 @@ export async function injectContextIntoConversation(
 
   // Small delay lets the editor settle before clicking send.
   await sleep(250);
-  let submitted = provider.submitComposer();
-  if (!submitted) {
-    await sleep(400);
+  let submitted = false;
+  for (let attempt = 0; attempt < 24 && !submitted; attempt++) {
     submitted = provider.submitComposer();
+    if (!submitted) await sleep(250);
   }
   return { filled: true, submitted };
 }
@@ -67,17 +63,15 @@ export async function submitQuestion(
   let filled = false;
   for (let attempt = 0; attempt < 3 && !filled; attempt++) {
     filled = provider.setComposerText(originalQuery);
+    if (filled) filled = squash(provider.readComposerText()).includes(squash(originalQuery.slice(0, 40)));
     if (!filled) await sleep(200);
   }
-  if (!filled) {
-    logComposerDiagnostics();
-    return false;
-  }
+  if (!filled) return false;
   await sleep(200);
-  let submitted = provider.submitComposer();
-  if (!submitted) {
-    await sleep(400);
+  let submitted = false;
+  for (let attempt = 0; attempt < 24 && !submitted; attempt++) {
     submitted = provider.submitComposer();
+    if (!submitted) await sleep(250);
   }
   return submitted;
 }
