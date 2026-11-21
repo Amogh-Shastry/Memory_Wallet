@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
 
@@ -53,12 +53,13 @@ jobs:
       - run: npm run check:no-remote
 
       # Fail the run if the production bundle grows past a sane ceiling.
-      # 23 MB model + 12 MB onnxruntime wasm + ~1 MB app code.
+      # ~22 MB model + 12 MB plain wasm + 22 MB asyncify wasm + ~2 MB app/assets.
+      # The zipped package is far smaller (~25 MB) because wasm/model compress well.
       - name: Check package size
         run: |
           total=$(du -sm dist | cut -f1)
           echo "dist is ${total} MB"
-          if [ "$total" -gt 45 ]; then
-            echo "::error::dist exceeded 45 MB — check for stale or accidental files"
+          if [ "$total" -gt 70 ]; then
+            echo "::error::dist exceeded 70 MB — check for stale or accidental files"
             exit 1
           fi
